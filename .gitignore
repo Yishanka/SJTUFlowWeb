@@ -1,0 +1,22 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Frontend
+node_modules/
+apps/frontend/dist/
+
+# Local app output
+.sjtuflow/
+SJTUFlowData/
+
+# Agents
+.agents
+.codex

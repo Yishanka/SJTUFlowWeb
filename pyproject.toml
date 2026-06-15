@@ -1,0 +1,31 @@
+[project]
+name = "sjtuflow"
+version = "0.1.0"
+description = "Local-first SJTUFlow web/backend assistant for SJTU study workflows"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.0",
+    "fastmcp>=3.4.2",
+    "uvicorn>=0.32.0",
+]
+
+[project.scripts]
+sjtuflow = "sjtuflow.cli.main:main"
+sjtuflow-web = "sjtuflow.web.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["apps/backend/src/sjtuflow"]
+artifacts = ["apps/backend/src/sjtuflow/builtin_skills/**/*.md"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/apps/backend/src/sjtuflow",
+    "/docs",
+    "/README.md",
+    "/pyproject.toml",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
