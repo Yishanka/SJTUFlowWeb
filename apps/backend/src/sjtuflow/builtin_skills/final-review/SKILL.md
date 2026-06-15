@@ -6,6 +6,7 @@
 
 ## Required Tools
 
+- `canvas.connection_status`
 - `canvas.list_courses`
 - `canvas.list_recent_announcements`
 - `canvas.list_assignments`
@@ -13,7 +14,6 @@
 - `canvas.list_files`
 - `transcripts.list`
 - `transcripts.read`
-- `skills.list`
 
 ## Workflow
 
@@ -24,7 +24,7 @@
    - 临近 DDL：`canvas.list_upcoming_assignments(window_days=21)`，过滤本课程。
    - 资料盘点：`canvas.list_files(course_id=<id>)` 概览（仅元数据，不下载）。
    - 本地 transcript 列表：`transcripts.list()`，按 metadata 中的 `title/source` 匹配该课程，挑出 3–5 条与考纲主题最相关的 `id`。
-3. 对挑出的 transcript，逐条调用 `transcripts.read(transcript_id=<id>)`，按 `transcript-review` 的抽取规则归纳主题与考点（避免重复；建议直接建议用户对单条 transcript 调用 `transcript-review` skill）。
+3. 对挑出的 transcript，逐条调用 `transcripts.read(transcript_id=<id>)`，按 `transcript-review` 的抽取规则归纳主题与考点，跨多条去重合并；本步骤已完成 transcript 阅读，不要再让用户单独跑 `transcript-review`。
 4. 综合输出复习计划：
    - "考纲主题 → 关联资料（文件 / transcript / 作业）→ 学习动作 → 预计用时" 四列表。
    - 按天 / 周的时间表，向考试日期倒推。
@@ -68,4 +68,4 @@
 - 本 skill 只读，不下载文件、不修改远端、不调用任何写工具。
 - 涉及考试日期 / 考纲范围等强声明信息时，必须显式标注"以课程通知为准"，避免误导。
 - 每门课最多读 5 条 transcript（`transcripts.read` 调用 ≤ 5 次），更多由用户分次追问。
-- Canvas 调用失败立即停止并报告，不做绕过。
+- Canvas 调用前可先 `canvas.connection_status(ping=true)` 确认 token 有效；调用失败立即停止并报告，不做绕过。

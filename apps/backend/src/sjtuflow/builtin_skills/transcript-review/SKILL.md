@@ -26,6 +26,8 @@
 聊天中以 Markdown 块返回，结构：
 
 ```
+# <transcript title> · <updated_at>
+
 ## 主题
 - ...
 

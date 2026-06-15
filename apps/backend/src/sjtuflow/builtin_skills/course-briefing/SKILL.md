@@ -37,13 +37,13 @@
 # <课程名> · 最近 <N> 天
 
 ## 公告 (<count>)
-- [<date>] <title> — <摘要前 200 字>
+- [<date>] <title> — <摘要前 200 字>（announcement_id=<id>）
 
 ## 作业 (<count>)
-- [<due_at>] <title>（<提交类型>, <points> 分）
+- [<due_at>] <title>（<提交类型>, <points> 分，assignment_id=<id>）
 
 ## 文件 (<count>)
-- [<updated_at>] <name>（<size>）
+- [<updated_at>] <name>（<size>，file_id=<id>）
 
 ## 本地 transcripts (<count>)
 - <title>（<updated_at>）
