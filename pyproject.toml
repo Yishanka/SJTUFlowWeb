@@ -10,6 +10,13 @@ dependencies = [
     "uvicorn>=0.32.0",
 ]
 
+[project.optional-dependencies]
+# Local media transcription (Workstream B). Requires the ffmpeg/ffprobe
+# binaries on PATH in addition to this Python package.
+media = [
+    "faster-whisper>=1.0.0",
+]
+
 [project.scripts]
 sjtuflow = "sjtuflow.cli.main:main"
 sjtuflow-web = "sjtuflow.web.server:main"
