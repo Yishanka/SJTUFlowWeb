@@ -107,6 +107,18 @@ def create_app(*, service: LocalAppService | None = None, frontend_dir: Path | N
     async def create_session(request: CreateSessionRequest):
         return await run_service(app, "create_session", run_briefing=request.run_briefing)
 
+    @app.get("/api/sessions")
+    async def list_sessions():
+        return await run_service(app, "list_sessions")
+
+    @app.get("/api/sessions/{session_id}")
+    async def read_session(session_id: str):
+        return await run_service(app, "read_session", session_id)
+
+    @app.delete("/api/sessions/{session_id}")
+    async def delete_session(session_id: str):
+        return await run_service(app, "delete_session", session_id)
+
     @app.post("/api/sessions/{session_id}/messages")
     async def send_message(session_id: str, request: MessageRequest):
         if not request.message.strip():

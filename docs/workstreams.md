@@ -12,7 +12,7 @@
 
 - First-run config：模型配置、Canvas token、资料目录、权限策略。
 - Dashboard：briefing 分块展示。
-- Chat workspace：会话列表、消息流、工具状态。
+- Chat workspace：历史会话列表、消息流、工具状态。
 - Skills：metadata 列表、全文查看、创建/编辑入口，区分内置 skill 与用户 skill。
 - Transcripts：metadata 列表、全文查看、上传/转写入口。
 - Settings：配置、doctor、数据目录、审计日志入口。
@@ -24,6 +24,9 @@
 - `GET /api/doctor`
 - `GET /api/briefing`
 - `POST /api/sessions`
+- `GET /api/sessions`
+- `GET /api/sessions/{session_id}`
+- `DELETE /api/sessions/{session_id}`
 - `POST /api/sessions/{session_id}/messages`
 - `GET /api/skills`
 - `GET /api/skills/{name}`
@@ -37,6 +40,7 @@
 
 - 不做登录页。
 - 首屏就是本地工作台或首次配置。
+- 用户能从历史会话列表恢复上一次聊天。
 - briefing 每类信息独立区块展示。
 - skill/transcript 列表只展示标题和说明，正文点击后读取。
 - 内置 skill 只能复制/查看；用户 skill 可以创建、编辑、删除。
@@ -194,6 +198,7 @@ mail.download_attachments(message_id: str, out_dir: str | None = None)
 - API tests。
 - pending approval 队列。
 - job manager。
+- 历史会话前端筛选、重命名和批量删除。
 - 前端开发 CORS 配置。
 - 更清晰的错误码。
 - 审计日志查看接口。

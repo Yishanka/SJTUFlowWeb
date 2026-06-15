@@ -39,6 +39,7 @@ Transcripts 默认保存在 `~/SJTUFlowData/transcripts/`。
 ~/.sjtuflow/
   config.toml
   skills/
+  sessions/
   audit/
 
 ~/SJTUFlowData/
@@ -54,6 +55,7 @@ Transcripts 默认保存在 `~/SJTUFlowData/transcripts/`。
 
 - monorepo：`apps/backend` + `apps/frontend`。
 - 本地 FastAPI 后端 API。
+- 历史会话本地保存与恢复 API。
 - Canvas 读取与文件下载工具。
 - Skill metadata-first 加载。
 - Transcript metadata-first 加载与文本保存。

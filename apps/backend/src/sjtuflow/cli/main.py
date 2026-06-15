@@ -164,6 +164,7 @@ def handle_doctor(args) -> int:
     print(f"- config: {config.path} ({'exists' if config.path.exists() else 'missing'})")
     print(f"- state_dir: {app.workspace.state_dir}")
     print(f"- data_dir: {app.workspace.data_dir}")
+    print(f"- sessions_dir: {app.workspace.state_dir / 'sessions'}")
     print(f"- model.provider: {config.model.provider}")
     print(f"- model.endpoint: {config.model.endpoint}")
     print(f"- model key: {'set' if config.model.resolved_api_key() else 'missing'} ({config.model.api_key_env})")

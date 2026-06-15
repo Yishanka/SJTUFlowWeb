@@ -18,6 +18,7 @@ from sjtuflow.storage.config import (
     load_config,
     set_config_value,
 )
+from sjtuflow.storage.sessions import SessionStore
 from sjtuflow.tools import build_registry
 from sjtuflow.tools.registry import ToolRegistry
 from sjtuflow.utils.text import redact, sanitize_slug
@@ -47,8 +48,8 @@ class LocalAppService:
     """Stateful local backend service used by the browser API.
 
     The service is intentionally process-local. SJTUFlow's first web version is
-    a single-user local app, so sessions live in memory and use the same local
-    config/workspace files as the CLI.
+    a single-user local app. Active sessions live in memory, while chat history
+    is persisted under the local state directory for browser restore.
     """
 
     def __init__(self, *, cwd: Path | None = None) -> None:
@@ -70,6 +71,9 @@ class LocalAppService:
 
     def registry(self) -> ToolRegistry:
         return build_registry()
+
+    def session_store(self) -> SessionStore:
+        return SessionStore(self.app_context().workspace.state_dir)
 
     def config_view(self, *, reveal_secrets: bool = False) -> dict[str, Any]:
         config = self.load_config()
@@ -194,6 +198,16 @@ class LocalAppService:
 
         return read_transcript_by_id(self.app_context(), transcript_id)
 
+    def list_sessions(self) -> list[dict[str, Any]]:
+        return self.session_store().list()
+
+    def read_session(self, session_id: str) -> dict[str, Any]:
+        return self.session_store().read(session_id).to_payload()
+
+    def delete_session(self, session_id: str) -> dict[str, Any]:
+        self._sessions.pop(session_id, None)
+        return self.session_store().delete(session_id)
+
     def create_session(self, *, run_briefing: bool | None = None) -> dict[str, Any]:
         config = self.load_config()
         app = build_app_context(config, cwd=self.cwd)
@@ -204,25 +218,51 @@ class LocalAppService:
         session_id = uuid4().hex
         now = datetime.now(timezone.utc).isoformat()
         self._sessions[session_id] = SessionState(id=session_id, loop=loop, created_at=now, updated_at=now)
+        self._persist_session(self._sessions[session_id])
         return self._session_payload(self._sessions[session_id])
 
     def get_session(self, session_id: str) -> SessionState:
         try:
             return self._sessions[session_id]
         except KeyError as exc:
-            raise KeyError(f"Unknown session: {session_id}") from exc
+            stored = self.session_store().read(session_id)
+            config = self.load_config()
+            app = build_app_context(config, cwd=self.cwd)
+            provider = build_provider(config.model.provider, config.model)
+            loop = AgentLoop(app=app, provider=provider, registry=self.registry(), interactive=False)
+            loop.messages = stored.messages
+            loop.briefing = stored.briefing
+            session = SessionState(
+                id=stored.id,
+                loop=loop,
+                created_at=stored.created_at,
+                updated_at=stored.updated_at,
+            )
+            self._sessions[session_id] = session
+            return session
 
     def send_message(self, session_id: str, message: str) -> dict[str, Any]:
         session = self.get_session(session_id)
         result = session.loop.run_user_message(message)
         session.updated_at = datetime.now(timezone.utc).isoformat()
+        self._persist_session(session)
         return self._session_payload(session, result=result)
 
     def clear_session(self, session_id: str, *, run_briefing: bool = False) -> dict[str, Any]:
         session = self.get_session(session_id)
         session.loop.start(run_briefing=run_briefing)
         session.updated_at = datetime.now(timezone.utc).isoformat()
+        self._persist_session(session)
         return self._session_payload(session)
+
+    def _persist_session(self, session: SessionState) -> None:
+        self.session_store().save(
+            session_id=session.id,
+            created_at=session.created_at,
+            updated_at=session.updated_at,
+            messages=session.loop.messages,
+            briefing=session.loop.briefing,
+        )
 
     def _session_payload(self, session: SessionState, *, result: AgentResult | None = None) -> dict[str, Any]:
         loop = session.loop

@@ -17,6 +17,7 @@ uv run sjtuflow web
 
 - monorepo 结构：`apps/backend` 放 Python 后端和内置 skills，`apps/frontend` 为空前端框架，`docs` 位于仓库根目录。
 - 后端 API：FastAPI 本地服务，提供配置、doctor、briefing、session chat、tools、skills、transcripts 等接口。
+- 历史会话：聊天消息本地保存到 `~/.sjtuflow/sessions/`，前端可恢复或删除历史对话。
 - Agent runtime：OpenAI-compatible tool calling、mock provider、工具循环、审计日志。
 - Canvas MVP：课程、作业、公告、文件列表、文件下载。
 - Skill MVP：只预加载标题和说明，按需通过 `skills.read` 读取全文。
@@ -46,6 +47,7 @@ uv run sjtuflow web
 - 首页有 briefing 区块：紧急、即将到来、更新、警告分块展示。
 - 主区域是对话/任务工作区，用户用自然语言提需求。
 - 侧栏展示 Skills、Transcripts、下载文件、近期任务。
+- 会话列表展示历史聊天，可恢复上下文继续提问。
 - 前端提供创建/编辑 skill 的入口；用户创建的 skills 写入 `~/.sjtuflow/skills/`。
 - 写文件、下载、外部写入等动作进入确认流程。
 - transcript 和 skill 默认只显示标题与说明，正文按需打开或由模型按需读取。

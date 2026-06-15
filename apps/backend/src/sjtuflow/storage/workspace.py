@@ -22,6 +22,7 @@ class Workspace:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         (self.state_dir / "audit").mkdir(parents=True, exist_ok=True)
         (self.state_dir / "cache").mkdir(parents=True, exist_ok=True)
+        (self.state_dir / "sessions").mkdir(parents=True, exist_ok=True)
         (self.data_dir / "canvas").mkdir(parents=True, exist_ok=True)
         (self.data_dir / "transcripts").mkdir(parents=True, exist_ok=True)
 

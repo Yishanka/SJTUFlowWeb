@@ -22,6 +22,7 @@
 - 实现首次配置页，对接 `GET/PUT /api/config` 和 `GET /api/doctor`。
 - 实现首页 briefing 区块，对接 `GET /api/briefing`。
 - 实现会话工作区，对接 `POST /api/sessions` 和 `POST /api/sessions/{id}/messages`。
+- 实现历史会话列表，对接 `GET /api/sessions`、`GET /api/sessions/{id}`、`DELETE /api/sessions/{id}`。
 - 实现 Skills 和 Transcripts 侧栏，只显示标题与说明，点击后再读取全文。
 - 实现创建 skill 按钮和编辑表单，写入用户本地 skill 目录。
 
@@ -31,6 +32,7 @@
 - 配置缺失、token 缺失、模型 key 缺失有明确提示。
 - briefing 按 urgent/upcoming/updates/warnings 分块展示。
 - mock provider 下可以完成一轮对话演示。
+- 关闭并重新打开前端后可以恢复历史会话。
 
 ## 阶段 2：确认与任务状态
 

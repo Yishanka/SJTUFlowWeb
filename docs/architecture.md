@@ -73,6 +73,9 @@ apps/frontend/
 | GET | `/api/transcripts` | 列出 transcript 标题和说明 |
 | GET | `/api/transcripts/{id}` | 按需读取完整 transcript |
 | POST | `/api/sessions` | 创建 agent 会话 |
+| GET | `/api/sessions` | 列出历史会话摘要 |
+| GET | `/api/sessions/{id}` | 读取历史会话完整消息 |
+| DELETE | `/api/sessions/{id}` | 删除历史会话 |
 | POST | `/api/sessions/{id}/messages` | 向会话发送消息 |
 | POST | `/api/sessions/{id}/clear` | 清空会话上下文 |
 
@@ -98,7 +101,8 @@ apps/frontend/
 4. 模型选择直接回答或调用工具。
 5. 工具按风险等级执行；Web 版本后续需要接入确认队列。
 6. 工具结果回写模型消息。
-7. 审计日志写入 `~/.sjtuflow/audit/YYYY-MM-DD.jsonl`。
+7. 会话消息写入 `~/.sjtuflow/sessions/<session-id>.json`。
+8. 审计日志写入 `~/.sjtuflow/audit/YYYY-MM-DD.jsonl`。
 
 当前 Web session 使用 `interactive=False`，因此需要确认的写工具默认会被拒绝，除非配置显式允许 `permissions.allow_non_interactive_writes`。前端确认队列是后续重点。
 
@@ -135,5 +139,7 @@ SJTUFlowData/
   extracted/
   reports/
 ```
+
+历史会话保存在 `~/.sjtuflow/sessions/`。它用于恢复聊天上下文；审计日志仍保存在 `~/.sjtuflow/audit/`，用于排错和追踪工具调用。
 
 不需要中心数据库。后续如果需要本地检索，可以在资料目录中增加轻量索引文件；这不作为当前架构的启动前提。
