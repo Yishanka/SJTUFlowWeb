@@ -35,6 +35,33 @@ class SkillWriteRequest(BaseModel):
     overwrite: bool = False
 
 
+class MediaProbeRequest(BaseModel):
+    path: str
+
+
+class MediaExtractAudioRequest(BaseModel):
+    path: str
+    out_dir: str | None = None
+    sync: bool = False
+
+
+class MediaTranscribeRequest(BaseModel):
+    path: str
+    provider: str = "local-whisper"
+    language: str | None = None
+    sync: bool = False
+
+
+class MediaSaveTranscriptRequest(BaseModel):
+    title: str
+    content: str = ""
+    source: str = ""
+    description: str = ""
+    segments: list[dict[str, Any]] | None = None
+    language: str | None = None
+    overwrite: bool = False
+
+
 def create_app(*, service: LocalAppService | None = None, frontend_dir: Path | None = None) -> FastAPI:
     app = FastAPI(
         title="SJTUFlow Local API",
@@ -102,6 +129,49 @@ def create_app(*, service: LocalAppService | None = None, frontend_dir: Path | N
     @app.get("/api/transcripts/{transcript_id}")
     async def transcript(transcript_id: str):
         return await run_service(app, "read_transcript", transcript_id)
+
+    @app.post("/api/media/probe")
+    async def media_probe(request: MediaProbeRequest):
+        return await run_service(app, "media_probe", request.path)
+
+    @app.post("/api/media/extract-audio")
+    async def media_extract_audio(request: MediaExtractAudioRequest):
+        return await run_service(
+            app, "media_extract_audio", request.path, request.out_dir, sync=request.sync
+        )
+
+    @app.post("/api/media/transcribe")
+    async def media_transcribe(request: MediaTranscribeRequest):
+        return await run_service(
+            app,
+            "media_transcribe",
+            request.path,
+            request.provider,
+            request.language,
+            sync=request.sync,
+        )
+
+    @app.post("/api/media/save-transcript")
+    async def media_save_transcript(request: MediaSaveTranscriptRequest):
+        return await run_service(
+            app,
+            "media_save_transcript",
+            request.title,
+            request.content,
+            request.source,
+            request.description,
+            segments=request.segments,
+            language=request.language,
+            overwrite=request.overwrite,
+        )
+
+    @app.get("/api/jobs")
+    async def list_jobs():
+        return await run_service(app, "list_jobs")
+
+    @app.get("/api/jobs/{job_id}")
+    async def get_job(job_id: str):
+        return await run_service(app, "get_job", job_id)
 
     @app.post("/api/sessions")
     async def create_session(request: CreateSessionRequest):

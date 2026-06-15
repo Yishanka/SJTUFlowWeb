@@ -18,6 +18,7 @@ from sjtuflow.storage.config import (
     load_config,
     set_config_value,
 )
+from sjtuflow.services.jobs import JobHandle, JobManager
 from sjtuflow.storage.sessions import SessionStore
 from sjtuflow.tools import build_registry
 from sjtuflow.tools.registry import ToolRegistry
@@ -55,6 +56,7 @@ class LocalAppService:
     def __init__(self, *, cwd: Path | None = None) -> None:
         self.cwd = (cwd or Path.cwd()).resolve()
         self._sessions: dict[str, SessionState] = {}
+        self.jobs = JobManager()
 
     def config_path(self) -> Path:
         return default_config_path()
@@ -197,6 +199,77 @@ class LocalAppService:
         from sjtuflow.tools.transcripts import read_transcript_by_id
 
         return read_transcript_by_id(self.app_context(), transcript_id)
+
+    # --- Media: probe / extract / transcribe / save ----------------------- #
+
+    def media_probe(self, path: str) -> dict[str, Any]:
+        from sjtuflow.tools.media import probe_media
+
+        return probe_media(self.app_context(), path)
+
+    def media_extract_audio(
+        self, path: str, out_dir: str | None = None, *, sync: bool = False
+    ) -> dict[str, Any]:
+        from sjtuflow.tools.media import extract_audio
+
+        def worker(handle: JobHandle) -> dict[str, Any]:
+            handle.update(progress=0.1, message="Extracting audio")
+            return extract_audio(self.app_context(), path, out_dir)
+
+        runner = self.jobs.run_sync if sync else self.jobs.submit
+        return runner("media.extract_audio", worker)
+
+    def media_transcribe(
+        self,
+        path: str,
+        provider: str = "local-whisper",
+        language: str | None = None,
+        *,
+        sync: bool = False,
+    ) -> dict[str, Any]:
+        from sjtuflow.tools.media import transcribe_media
+
+        def worker(handle: JobHandle) -> dict[str, Any]:
+            def progress(fraction: float, message: str) -> None:
+                handle.update(progress=fraction, message=message)
+
+            result = transcribe_media(
+                self.app_context(), path, provider=provider, language=language, progress=progress
+            )
+            return result.to_dict()
+
+        runner = self.jobs.run_sync if sync else self.jobs.submit
+        return runner("media.transcribe", worker)
+
+    def media_save_transcript(
+        self,
+        title: str,
+        content: str = "",
+        source: str = "",
+        description: str = "",
+        *,
+        segments: list[dict[str, Any]] | None = None,
+        language: str | None = None,
+        overwrite: bool = False,
+    ) -> dict[str, Any]:
+        from sjtuflow.tools.media import save_transcript
+
+        return save_transcript(
+            self.app_context(),
+            title,
+            content,
+            source,
+            description,
+            segments=segments,
+            language=language,
+            overwrite=overwrite,
+        )
+
+    def get_job(self, job_id: str) -> dict[str, Any]:
+        return self.jobs.get(job_id)
+
+    def list_jobs(self) -> list[dict[str, Any]]:
+        return self.jobs.list()
 
     def list_sessions(self) -> list[dict[str, Any]]:
         return self.session_store().list()

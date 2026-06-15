@@ -74,10 +74,21 @@ def _metadata_for_file(root: Path, path: Path) -> dict[str, Any]:
 
 def list_transcript_metadata(app: AppContext) -> list[dict[str, Any]]:
     root = transcript_root(app)
-    transcripts: list[dict[str, Any]] = []
+    # Media saves write a <slug>.json (canonical, with segments) plus a
+    # <slug>.md (readable) pair. Collapse such pairs to a single entry so the
+    # library does not show the same transcript twice; the JSON wins because it
+    # carries structured metadata and segments.
+    by_stem: dict[Path, Path] = {}
+    rank = {".json": 0, ".md": 1, ".txt": 2}
     for path in sorted(root.rglob("*")):
         if not path.is_file() or path.suffix.lower() not in TRANSCRIPT_EXTENSIONS:
             continue
+        key = path.with_suffix("")
+        current = by_stem.get(key)
+        if current is None or rank.get(path.suffix.lower(), 9) < rank.get(current.suffix.lower(), 9):
+            by_stem[key] = path
+    transcripts: list[dict[str, Any]] = []
+    for path in sorted(by_stem.values()):
         transcripts.append(_metadata_for_file(root, path))
     return transcripts
 
