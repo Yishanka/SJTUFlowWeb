@@ -25,7 +25,7 @@ SJTU_CANVAS_HOST = "oc.sjtu.edu.cn"
 
 CANVAS_MEDIA_LOGIN_MESSAGE = (
     "SJTU Canvas external_tools media pages usually cannot be fetched with a Canvas API token alone. "
-    "The user must keep a browser session logged in (保持登录态) and let the frontend provide an authorized media "
+    "The user must keep a browser session logged in and let the frontend provide an authorized media "
     "stream URL or same-session request headers. SJTUFlow does not bypass authentication, CAPTCHA, DRM, "
     "or course permissions. The video stream is not saved locally; only the generated transcript is saved."
 )
