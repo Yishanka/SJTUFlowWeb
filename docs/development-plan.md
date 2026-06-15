@@ -54,25 +54,32 @@
 
 ## 阶段 3：视频与 Transcript
 
-目标：支持从本地视频/音频生成 transcript，可选保存，并让 agent 按需读取。
+目标：支持从本地视频/音频或已授权浏览器媒体流生成 transcript，默认保存到资料库，并让 agent 按需读取。
 
 开发内容：
 
-- 后端新增 media 工具：
+- 后端 media 工具：
+  - `media.canvas_access_hint`
   - `media.probe`
   - `media.extract_audio`
   - `media.transcribe`
+  - `media.transcribe_and_save`
+  - `media.transcribe_stream`
   - `media.save_transcript`
 - 支持上传本地媒体文件或填写本地路径。
-- 优先支持本地文件，不绕过平台权限或 DRM。
+- 支持前端从 SJTU Canvas `external_tools` 登录态页面转交流媒体 `stream_url`。
+- Canvas token 通常不能直接获取 external_tools 媒体流；必须记录并在模型回复中说明浏览器登录态要求。
+- 不绕过平台权限、验证码或 DRM。
+- 视频本体不保存到本地；只允许转写期间的临时音频缓存，任务结束后清理。
 - transcript 输出 Markdown 和 JSON 两种格式。
+- demo 默认保存 transcript 到资料库，暂不提供“不保存”或资料管理入口。
 - transcript metadata 只包含标题、说明、来源、时长、路径、更新时间。
 - 全文通过 `transcripts.read` 按需加载。
 
 交付标准：
 
 - 小视频/音频可以生成带时间戳 transcript。
-- 用户可选择保存或只在当前会话临时使用。
+- 已授权媒体流可以转成 transcript，并且不保存视频本体。
 - transcript 列表不会预加载全文。
 
 ## 阶段 4：更多 Skills

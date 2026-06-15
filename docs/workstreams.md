@@ -44,28 +44,35 @@
 - briefing 每类信息独立区块展示。
 - skill/transcript 列表只展示标题和说明，正文点击后读取。
 - 内置 skill 只能复制/查看；用户 skill 可以创建、编辑、删除。
+- 当前的大部分用户端 CLI 功能都能迁移到前端的“按钮”上。
 
 ## B. 视频提取与转 Transcript Tools
 
 负责人目标：实现本地媒体处理工具，让 agent 能把视频/音频转换成 transcript。
 
-开发位置：`apps/backend/src/sjtuflow/tools/media.py`、`apps/backend/src/sjtuflow/web/app.py`、`apps/backend/src/sjtuflow/services/`。
+开发位置：`apps/backend/src/sjtuflow/tools/media.py`、`apps/backend/src/sjtuflow/services/local_app.py`、`apps/backend/src/sjtuflow/web/app.py`、`tests/test_media.py`。
 
 后端工具建议：
 
 ```text
+media.canvas_access_hint(url: str)
 media.probe(path: str)
 media.extract_audio(path: str, out_dir: str | None = None)
 media.transcribe(path: str, provider: str = "local-whisper", language: str | None = None)
+media.transcribe_and_save(path: str, title: str | None = None, provider: str = "local-whisper", language: str | None = None)
+media.transcribe_stream(stream_url: str, title: str, provider: str = "local-whisper", language: str | None = None)
 media.save_transcript(title: str, content: str, source: str = "", description: str = "")
 ```
 
 接口建议：
 
 ```text
+POST /api/media/canvas-access-hint
 POST /api/media/probe
 POST /api/media/extract-audio
 POST /api/media/transcribe
+POST /api/media/transcribe-and-save
+POST /api/media/transcribe-stream
 POST /api/media/save-transcript
 GET  /api/jobs/{job_id}
 ```
@@ -73,11 +80,30 @@ GET  /api/jobs/{job_id}
 实现要求：
 
 - 优先处理用户主动提供的本地文件。
+- SJTU Canvas `external_tools` 媒体页通常不能只靠 Canvas token 抓取；需要用户在浏览器里保持登录态，由前端提供已授权的媒体 stream URL 或同源请求头。
+- 模型回复时要明确说明这个限制，不要暗示可以绕过认证。
 - 不绕过视频平台 DRM、验证码或权限限制。
 - 大文件/转写走 job 状态，不阻塞 HTTP 请求。
+- 视频本体不保存到本地，只保留临时音频缓存并在任务结束后清理。
 - transcript JSON 保存 segments、start、end、text。
 - transcript Markdown 供阅读和后续检索。
-- 用户可选择“只用于本轮会话”或“保存到资料库”。
+- demo 默认直接保存到资料库，不提供“不保存”入口；若需要临时结果，可走底层 `media.transcribe`。
+
+目标工作流：
+
+1. 用户问“今天 xxx 课程中老师是否提到有签到？”。
+2. Agent 先调用 `transcripts.list` 查本地资料库是否已有今天该课程的 transcript。
+3. 如果已有，按需 `transcripts.read` 读取全文并回答。
+4. 如果没有，前端引导用户打开 SJTU Canvas 对应 `https://oc.sjtu.edu.cn/courses/<course_id>/external_tools/<tool_id>` 页面并保持登录。
+5. 前端从登录态页面解析已授权的 `stream_url`，或把同会话请求头转交给本地后端。
+6. 后端调用 `POST /api/media/transcribe-stream`，用 ffmpeg 流式抽取临时音频，转写完成后默认保存 transcript 到 `~/SJTUFlowData/transcripts/`。
+7. Agent 再按 metadata-first 规则读取新 transcript，回答是否提到签到，并指出来源 transcript。
+
+本地视频模式：
+
+1. 用户在前端选择本地视频/音频文件或填写本地路径。
+2. 前端调用 `POST /api/media/transcribe-and-save`。
+3. 后端只读取用户提供的本地文件，生成 transcript 并默认入库；不会复制或管理原视频文件。
 
 ## C. Transcript Library
 
@@ -186,6 +212,8 @@ mail.download_attachments(message_id: str, out_dir: str | None = None)
 - 正文截断，附件下载需确认。
 - 邮箱密码使用环境变量或系统凭据，不写日志。
 - 暂不实现发送邮件。
+
+*教务信息网站也可开发，可能涉及爬虫相关*
 
 ## F. 后端基础与质量
 

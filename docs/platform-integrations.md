@@ -86,16 +86,19 @@ transcripts.save_text
 
 ## 视频与音频
 
-下一阶段重点实现：
+当前工具：
 
 ```text
+media.canvas_access_hint
 media.probe
 media.extract_audio
 media.transcribe
+media.transcribe_and_save
+media.transcribe_stream
 media.save_transcript
 ```
 
-建议流水线：
+本地文件流水线：
 
 ```text
 local video/audio
@@ -103,15 +106,29 @@ local video/audio
   -> extract audio
   -> ASR transcription
   -> transcript JSON + Markdown
-  -> optional save
-  -> optional indexing
+  -> save to transcript library by default
+```
+
+SJTU Canvas external_tools 流媒体流水线：
+
+```text
+Canvas external_tools page
+  -> user keeps browser login session
+  -> frontend extracts/passes authorized stream_url or same-session headers
+  -> backend ffmpeg streams temporary audio
+  -> ASR transcription
+  -> transcript JSON + Markdown
+  -> save to transcript library by default
 ```
 
 要求：
 
 - 只处理用户提供或已授权访问的媒体文件。
+- Canvas API token 通常不能直接获取 `https://oc.sjtu.edu.cn/courses/<id>/external_tools/<id>` 中的媒体流；需要浏览器登录态。
+- Agent 回复相关问题时必须说明登录态要求，不能暗示可以绕过认证、验证码、DRM 或课程权限。
+- 视频本体不保存到本地；流媒体处理只允许临时音频缓存，任务结束后清理。
 - 大文件走 job 状态。
-- transcript 可只在会话临时使用，也可保存。
+- transcript 默认保存到 `~/SJTUFlowData/transcripts/`，demo 暂不提供“不保存”或资料管理入口。
 
 ## 邮箱
 

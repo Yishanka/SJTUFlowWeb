@@ -241,6 +241,75 @@ class LocalAppService:
         runner = self.jobs.run_sync if sync else self.jobs.submit
         return runner("media.transcribe", worker)
 
+    def media_transcribe_and_save(
+        self,
+        path: str,
+        title: str | None = None,
+        provider: str = "local-whisper",
+        language: str | None = None,
+        description: str = "",
+        *,
+        overwrite: bool = False,
+        sync: bool = False,
+    ) -> dict[str, Any]:
+        from sjtuflow.tools.media import transcribe_media_and_save
+
+        def worker(handle: JobHandle) -> dict[str, Any]:
+            def progress(fraction: float, message: str) -> None:
+                handle.update(progress=fraction, message=message)
+
+            return transcribe_media_and_save(
+                self.app_context(),
+                path,
+                title=title,
+                provider=provider,
+                language=language,
+                description=description,
+                overwrite=overwrite,
+                progress=progress,
+            )
+
+        runner = self.jobs.run_sync if sync else self.jobs.submit
+        return runner("media.transcribe_and_save", worker)
+
+    def media_canvas_access_hint(self, url: str) -> dict[str, Any]:
+        from sjtuflow.tools.media import canvas_media_access_hint
+
+        return canvas_media_access_hint(url)
+
+    def media_transcribe_stream(
+        self,
+        stream_url: str,
+        title: str,
+        provider: str = "local-whisper",
+        language: str | None = None,
+        description: str = "",
+        *,
+        overwrite: bool = False,
+        request_headers: dict[str, str] | None = None,
+        sync: bool = False,
+    ) -> dict[str, Any]:
+        from sjtuflow.tools.media import transcribe_stream_to_transcript
+
+        def worker(handle: JobHandle) -> dict[str, Any]:
+            def progress(fraction: float, message: str) -> None:
+                handle.update(progress=fraction, message=message)
+
+            return transcribe_stream_to_transcript(
+                self.app_context(),
+                stream_url,
+                title,
+                provider=provider,
+                language=language,
+                description=description,
+                overwrite=overwrite,
+                request_headers=request_headers,
+                progress=progress,
+            )
+
+        runner = self.jobs.run_sync if sync else self.jobs.submit
+        return runner("media.transcribe_stream", worker)
+
     def media_save_transcript(
         self,
         title: str,

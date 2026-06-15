@@ -21,6 +21,7 @@ FastAPI backend
   |           +-- Filesystem tools
   |           +-- Skills tools
   |           +-- Transcript tools
+  |           +-- Media tools
   |
   +-- Workspace / audit / local data
 ```
@@ -38,7 +39,7 @@ apps/backend/src/sjtuflow/
   services/     Web/CLI 可复用的本地服务层
   skills/       SKILL.md 加载与 metadata
   storage/      config、workspace、audit
-  tools/        Canvas/filesystem/skills/transcripts 工具
+  tools/        Canvas/filesystem/skills/transcripts/media 工具
   web/          FastAPI app 与 uvicorn 入口
   builtin_skills/
     weekly-review/SKILL.md
@@ -72,6 +73,15 @@ apps/frontend/
 | DELETE | `/api/skills/{name}` | 删除用户 skill |
 | GET | `/api/transcripts` | 列出 transcript 标题和说明 |
 | GET | `/api/transcripts/{id}` | 按需读取完整 transcript |
+| POST | `/api/media/canvas-access-hint` | 说明 Canvas external_tools 媒体页的登录态要求 |
+| POST | `/api/media/probe` | 读取本地媒体元数据 |
+| POST | `/api/media/extract-audio` | 从本地媒体提取音频 |
+| POST | `/api/media/transcribe` | 本地媒体转写，返回内存结果 |
+| POST | `/api/media/transcribe-and-save` | 本地媒体转写并默认保存 transcript |
+| POST | `/api/media/transcribe-stream` | 已授权媒体流转写并默认保存 transcript |
+| POST | `/api/media/save-transcript` | 保存 transcript JSON/Markdown |
+| GET | `/api/jobs` | 列出后台任务 |
+| GET | `/api/jobs/{id}` | 查询后台任务状态 |
 | POST | `/api/sessions` | 创建 agent 会话 |
 | GET | `/api/sessions` | 列出历史会话摘要 |
 | GET | `/api/sessions/{id}` | 读取历史会话完整消息 |
@@ -122,7 +132,8 @@ Transcript：
 
 - `transcripts.list` 和 Web `/api/transcripts` 只返回 `id/title/description/path/source/duration`。
 - 模型需要全文时调用 `transcripts.read`。
-- 转写结果可保存为 Markdown 或 JSON，默认在 `~/SJTUFlowData/transcripts/`。
+- 转写结果保存为 JSON 和 Markdown，默认在 `~/SJTUFlowData/transcripts/`。
+- 媒体流转写不保存视频本体，只保留 transcript；Canvas `external_tools` 媒体页需要浏览器登录态提供已授权 stream URL。
 
 ## 数据目录
 

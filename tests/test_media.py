@@ -22,9 +22,12 @@ from sjtuflow.tools.media import (
     MediaError,
     TranscriptResult,
     TranscriptSegment,
+    canvas_media_access_hint,
     probe_media,
     save_transcript,
     transcribe_media,
+    transcribe_media_and_save,
+    transcribe_stream_to_transcript,
 )
 from sjtuflow.tools.registry import ToolContext, run_tool
 
@@ -109,6 +112,17 @@ def test_probe_missing_file_raises(tmp_path):
         probe_media(app, str(tmp_path / "nope.mp4"))
 
 
+def test_canvas_media_access_hint_flags_login_session():
+    hint = canvas_media_access_hint("https://oc.sjtu.edu.cn/courses/123/external_tools/456")
+    assert hint["requires_browser_login"] is True
+    assert hint["canvas_token_supported"] is False
+    assert hint["video_saved_locally"] is False
+    assert hint["transcript_saved_by_default"] is True
+    assert "Canvas API token" in hint["message"]
+    assert "登录态" in hint["message"] or "logged in" in hint["message"].lower()
+    assert hint["is_external_tool"] is True
+
+
 # --------------------------------------------------------------------------- #
 # transcribe
 # --------------------------------------------------------------------------- #
@@ -141,6 +155,63 @@ def test_transcribe_progress_callback(tmp_path, fake_pipeline):
     seen: list[float] = []
     transcribe_media(app, str(media), provider="local-whisper", progress=lambda f, m: seen.append(f))
     assert seen and seen[-1] >= 0.9
+
+
+def test_transcribe_media_and_save_defaults_to_library(tmp_path, fake_pipeline):
+    app = _app(tmp_path)
+    media = _touch(tmp_path / "data" / "lecture.mp4")
+    meta = transcribe_media_and_save(app, str(media), title="Lecture Save", provider="local-whisper")
+    assert Path(meta["path"]).exists()
+    assert meta["title"] == "Lecture Save"
+    assert meta["segment_count"] == 2
+    assert meta["transcript"]["segments"][0]["text"] == "hello world"
+
+
+def test_stream_transcribe_saves_transcript_without_persisting_media(tmp_path, monkeypatch):
+    app = _app(tmp_path)
+
+    def fake_run(cmd, *, timeout=1800):
+        output = Path(cmd[-1])
+        output.write_bytes(b"\x00\x00")
+
+        class _Completed:
+            stdout = ""
+
+        return _Completed()
+
+    def fake_whisper(audio_path, language, model_size):
+        return TranscriptResult(
+            segments=[TranscriptSegment(0.0, 4.0, "老师提到了签到")],
+            language=language or "zh",
+            provider="local-whisper",
+        )
+
+    monkeypatch.setattr(media_mod, "_run", fake_run)
+    monkeypatch.setattr(media_mod, "_transcribe_faster_whisper", fake_whisper)
+
+    meta = transcribe_stream_to_transcript(
+        app,
+        "https://media.example.test/course/playlist.m3u8",
+        "Today Lecture",
+        provider="local-whisper",
+        request_headers={"Cookie": "session=secret"},
+    )
+
+    assert Path(meta["path"]).exists()
+    assert meta["source"] == "https://media.example.test/course/playlist.m3u8"
+    assert meta["video_saved_locally"] is False
+    assert meta["segment_count"] == 1
+    assert not list((tmp_path / "state" / "cache" / "media-streams").glob("*.wav"))
+
+    payload = json.loads(Path(meta["path"]).read_text(encoding="utf-8"))
+    assert payload["segments"][0]["text"] == "老师提到了签到"
+    assert payload["metadata"]["source"] == "https://media.example.test/course/playlist.m3u8"
+
+
+def test_stream_transcribe_requires_http_url(tmp_path):
+    app = _app(tmp_path)
+    with pytest.raises(MediaError):
+        transcribe_stream_to_transcript(app, "file:///tmp/video.mp4", "Bad Stream")
 
 
 # --------------------------------------------------------------------------- #
@@ -225,7 +296,15 @@ def test_saved_transcript_json_md_pair_not_duplicated(tmp_path):
 def test_media_tools_registered():
     registry = build_registry()
     names = {tool.name for tool in registry.list()}
-    assert {"media.probe", "media.extract_audio", "media.transcribe", "media.save_transcript"} <= names
+    assert {
+        "media.canvas_access_hint",
+        "media.probe",
+        "media.extract_audio",
+        "media.transcribe",
+        "media.transcribe_and_save",
+        "media.transcribe_stream",
+        "media.save_transcript",
+    } <= names
 
 
 def test_media_transcribe_tool_via_registry(tmp_path, fake_pipeline):
@@ -242,6 +321,8 @@ def test_media_risk_levels():
     registry = build_registry()
     assert registry.get("media.extract_audio").requires_confirmation is True
     assert registry.get("media.save_transcript").requires_confirmation is True
+    assert registry.get("media.transcribe_and_save").requires_confirmation is True
+    assert registry.get("media.transcribe_stream").requires_confirmation is True
     assert registry.get("media.probe").risk_level == "read"
     assert registry.get("media.transcribe").risk_level == "read"
 
@@ -328,3 +409,38 @@ def test_service_transcribe_and_save_pipeline(tmp_path, monkeypatch, fake_pipeli
 
     listed = service.list_transcripts()
     assert any(item["title"] == "Session Recording" for item in listed)
+
+
+def test_service_transcribe_and_save_default_pipeline(tmp_path, monkeypatch, fake_pipeline):
+    monkeypatch.setenv("SJTU_FLOW_CONFIG", str(tmp_path / "config.toml"))
+    service = LocalAppService(cwd=tmp_path)
+    service.update_config(
+        {
+            "workspace.state_dir": str(tmp_path / "state"),
+            "workspace.data_dir": str(tmp_path / "data"),
+        }
+    )
+    media = _touch(tmp_path / "data" / "default-save.mp4")
+
+    job = service.media_transcribe_and_save(
+        str(media),
+        title="Default Save Recording",
+        provider="local-whisper",
+        sync=True,
+    )
+    assert job["status"] == "succeeded"
+    assert Path(job["result"]["path"]).exists()
+    assert job["result"]["title"] == "Default Save Recording"
+
+
+def test_service_canvas_access_hint(tmp_path, monkeypatch):
+    monkeypatch.setenv("SJTU_FLOW_CONFIG", str(tmp_path / "config.toml"))
+    service = LocalAppService(cwd=tmp_path)
+    service.update_config(
+        {
+            "workspace.state_dir": str(tmp_path / "state"),
+            "workspace.data_dir": str(tmp_path / "data"),
+        }
+    )
+    hint = service.media_canvas_access_hint("https://oc.sjtu.edu.cn/courses/123/external_tools/456")
+    assert hint["status"] == "requires_browser_session"

@@ -39,6 +39,10 @@ class MediaProbeRequest(BaseModel):
     path: str
 
 
+class MediaAccessHintRequest(BaseModel):
+    url: str
+
+
 class MediaExtractAudioRequest(BaseModel):
     path: str
     out_dir: str | None = None
@@ -50,6 +54,27 @@ class MediaTranscribeRequest(BaseModel):
     provider: str = "local-whisper"
     language: str | None = None
     sync: bool = False
+
+
+class MediaTranscribeAndSaveRequest(BaseModel):
+    path: str
+    title: str | None = None
+    provider: str = "local-whisper"
+    language: str | None = None
+    description: str = ""
+    overwrite: bool = False
+    sync: bool = False
+
+
+class MediaTranscribeStreamRequest(BaseModel):
+    stream_url: str
+    title: str
+    provider: str = "local-whisper"
+    language: str | None = None
+    description: str = ""
+    overwrite: bool = False
+    sync: bool = False
+    request_headers: dict[str, str] | None = None
 
 
 class MediaSaveTranscriptRequest(BaseModel):
@@ -134,6 +159,10 @@ def create_app(*, service: LocalAppService | None = None, frontend_dir: Path | N
     async def media_probe(request: MediaProbeRequest):
         return await run_service(app, "media_probe", request.path)
 
+    @app.post("/api/media/canvas-access-hint")
+    async def media_canvas_access_hint(request: MediaAccessHintRequest):
+        return await run_service(app, "media_canvas_access_hint", request.url)
+
     @app.post("/api/media/extract-audio")
     async def media_extract_audio(request: MediaExtractAudioRequest):
         return await run_service(
@@ -148,6 +177,35 @@ def create_app(*, service: LocalAppService | None = None, frontend_dir: Path | N
             request.path,
             request.provider,
             request.language,
+            sync=request.sync,
+        )
+
+    @app.post("/api/media/transcribe-and-save")
+    async def media_transcribe_and_save(request: MediaTranscribeAndSaveRequest):
+        return await run_service(
+            app,
+            "media_transcribe_and_save",
+            request.path,
+            request.title,
+            request.provider,
+            request.language,
+            request.description,
+            overwrite=request.overwrite,
+            sync=request.sync,
+        )
+
+    @app.post("/api/media/transcribe-stream")
+    async def media_transcribe_stream(request: MediaTranscribeStreamRequest):
+        return await run_service(
+            app,
+            "media_transcribe_stream",
+            request.stream_url,
+            request.title,
+            request.provider,
+            request.language,
+            request.description,
+            overwrite=request.overwrite,
+            request_headers=request.request_headers,
             sync=request.sync,
         )
 

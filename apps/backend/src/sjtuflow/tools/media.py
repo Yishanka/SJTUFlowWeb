@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 from sjtuflow.runtime import AppContext
 from sjtuflow.tools.registry import ToolContext, ToolRegistry
@@ -19,6 +21,14 @@ from sjtuflow.utils.text import sanitize_filename
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".flv", ".m4v", ".wmv", ".mpg", ".mpeg"}
 AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".wma"}
 MEDIA_EXTENSIONS = VIDEO_EXTENSIONS | AUDIO_EXTENSIONS
+SJTU_CANVAS_HOST = "oc.sjtu.edu.cn"
+
+CANVAS_MEDIA_LOGIN_MESSAGE = (
+    "SJTU Canvas external_tools media pages usually cannot be fetched with a Canvas API token alone. "
+    "The user must keep a browser session logged in (保持登录态) and let the frontend provide an authorized media "
+    "stream URL or same-session request headers. SJTUFlow does not bypass authentication, CAPTCHA, DRM, "
+    "or course permissions. The video stream is not saved locally; only the generated transcript is saved."
+)
 
 
 class MediaError(RuntimeError):
@@ -42,7 +52,7 @@ class TranscriptSegment:
 
 @dataclass
 class TranscriptResult:
-    """In-memory transcript, returned by transcribe before any optional save."""
+    """In-memory transcript returned by low-level transcription calls."""
 
     segments: list[TranscriptSegment] = field(default_factory=list)
     language: str | None = None
@@ -92,9 +102,68 @@ def _run(cmd: list[str], *, timeout: int = 1800) -> subprocess.CompletedProcess[
         raise MediaError(f"{cmd[0]} failed: {tail}") from exc
 
 
+def _headers_to_ffmpeg_value(headers: dict[str, str] | None) -> str | None:
+    if not headers:
+        return None
+    lines = [f"{key}: {value}\r\n" for key, value in headers.items() if value is not None]
+    return "".join(lines) if lines else None
+
+
+def _cleanup_temp_file(path: Path) -> None:
+    try:
+        if path.exists():
+            path.unlink()
+    except OSError:
+        pass
+
+
 # --------------------------------------------------------------------------- #
 # probe
 # --------------------------------------------------------------------------- #
+
+
+def canvas_media_access_hint(url: str) -> dict[str, Any]:
+    """Explain what is needed before SJTU Canvas media can be streamed.
+
+    Canvas API tokens cover normal Canvas LMS API routes, but media embedded
+    behind ``external_tools`` pages is commonly served through the browser
+    login session. This function is intentionally descriptive instead of
+    pretending a token can fetch the stream.
+    """
+
+    parsed = urlparse(url)
+    host = (parsed.hostname or parsed.netloc).lower()
+    path = parsed.path.strip("/")
+    is_sjtu_canvas = host == SJTU_CANVAS_HOST
+    is_external_tool = is_sjtu_canvas and "/external_tools/" in f"/{path}/"
+
+    next_steps = [
+        "前端先检查资料库里是否已有该课程/日期的 transcript。",
+        "如果没有 transcript，用户需要在浏览器里保持 SJTU Canvas 登录态并打开对应 external_tools 页面。",
+        "前端从登录态页面中解析或转交已授权的媒体 stream_url 给本地后端。",
+        "后端用 ffmpeg 流式读取媒体，只生成临时音频并转写；视频本体不保存。",
+        "转写完成后 transcript 默认保存到本地资料库，后续问答通过 transcripts.list/read 按需读取。",
+    ]
+
+    return {
+        "url": url,
+        "host": host,
+        "is_sjtu_canvas": is_sjtu_canvas,
+        "is_external_tool": is_external_tool,
+        "canvas_token_supported": False if is_external_tool else None,
+        "requires_browser_login": bool(is_external_tool),
+        "video_saved_locally": False,
+        "transcript_saved_by_default": True,
+        "status": "requires_browser_session" if is_external_tool else "unknown_media_url",
+        "message": CANVAS_MEDIA_LOGIN_MESSAGE,
+        "next_steps": next_steps,
+    }
+
+
+def _validate_stream_url(url: str) -> None:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise MediaError("stream_url must be an authorized http(s) media URL from the logged-in frontend session.")
 
 
 def probe_media(app: AppContext, path: str) -> dict[str, Any]:
@@ -265,9 +334,8 @@ def transcribe_media(
 
     The source may be a media file (video/audio) or an already-extracted WAV.
     For non-WAV input, audio is extracted with ffmpeg first. The result is
-    returned in memory; persisting it is a separate, explicit step
-    (:func:`save_transcript`) so the user can choose "this session only" vs
-    "save to library".
+    returned in memory for low-level callers. The Web demo should prefer
+    :func:`transcribe_media_and_save`, which persists the transcript by default.
     """
 
     source = app.workspace.resolve_read_path(path)
@@ -302,6 +370,126 @@ def transcribe_media(
         {"source": str(source), "provider": result.provider, "segments": len(result.segments)},
     )
     return result
+
+
+def transcribe_media_and_save(
+    app: AppContext,
+    path: str,
+    title: str | None = None,
+    provider: str = "local-whisper",
+    language: str | None = None,
+    description: str = "",
+    *,
+    overwrite: bool = False,
+    progress: Callable[[float, str], None] | None = None,
+) -> dict[str, Any]:
+    """Transcribe a local media file and save the transcript immediately."""
+
+    result = transcribe_media(app, path, provider=provider, language=language, progress=progress)
+    source = result.source or str(app.workspace.resolve_read_path(path))
+    transcript_title = title or Path(source).stem
+    metadata = save_transcript(
+        app,
+        transcript_title,
+        result.text,
+        source=source,
+        description=description,
+        segments=[segment.to_dict() for segment in result.segments],
+        language=result.language,
+        overwrite=overwrite,
+    )
+    metadata["transcript"] = result.to_dict()
+    return metadata
+
+
+def transcribe_stream_to_transcript(
+    app: AppContext,
+    stream_url: str,
+    title: str,
+    provider: str = "local-whisper",
+    language: str | None = None,
+    description: str = "",
+    *,
+    overwrite: bool = False,
+    request_headers: dict[str, str] | None = None,
+    progress: Callable[[float, str], None] | None = None,
+) -> dict[str, Any]:
+    """Stream an authorized media URL into a temp WAV, transcribe it, and save the transcript.
+
+    The source video itself is never persisted. Only a temporary audio file is
+    used during the transcription step.
+    """
+
+    _validate_stream_url(stream_url)
+
+    cache_dir = app.workspace.assert_safe_write_path(app.workspace.state_dir / "cache" / "media-streams")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    safe_title = sanitize_filename(title).lower().replace(" ", "-") or "stream"
+    temp_audio = app.workspace.assert_safe_write_path(
+        cache_dir / f"{safe_title}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{time.time_ns()}.wav"
+    )
+
+    def report(fraction: float, message: str) -> None:
+        if progress is not None:
+            progress(fraction, message)
+
+    report(0.05, "Preparing authorized media stream")
+    headers_value = _headers_to_ffmpeg_value(request_headers)
+    cmd = [
+        "ffmpeg",
+        "-y",
+    ]
+    if headers_value:
+        cmd.extend(["-headers", headers_value])
+    cmd.extend(
+        [
+            "-i",
+            stream_url,
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-c:a",
+            "pcm_s16le",
+            str(temp_audio),
+        ]
+    )
+
+    try:
+        report(0.15, "Reading stream and extracting audio")
+        _run(cmd, timeout=3600)
+        report(0.45, "Transcribing stream audio")
+        result = transcribe_media(
+            app,
+            str(temp_audio),
+            provider=provider,
+            language=language,
+            progress=lambda fraction, message: report(0.45 + fraction * 0.45, message),
+        )
+        result.source = stream_url
+        report(0.95, "Saving transcript")
+        metadata = save_transcript(
+            app,
+            title,
+            result.text,
+            source=stream_url,
+            description=description,
+            segments=[segment.to_dict() for segment in result.segments],
+            language=result.language,
+            overwrite=overwrite,
+        )
+        metadata["transcript"] = result.to_dict()
+        metadata["stream_url"] = stream_url
+        metadata["video_saved_locally"] = False
+        app.audit.record(
+            "media_transcribe_stream",
+            {"source": stream_url, "title": title, "provider": result.provider, "segments": len(result.segments)},
+        )
+        report(1.0, "Done")
+        return metadata
+    finally:
+        _cleanup_temp_file(temp_audio)
 
 
 # --------------------------------------------------------------------------- #
@@ -414,6 +602,22 @@ def save_transcript(
 
 def register_media_tools(registry: ToolRegistry) -> None:
     @registry.tool(
+        name="media.canvas_access_hint",
+        description=(
+            "Explain why a SJTU Canvas external_tools media page may require a browser login session instead of a Canvas token."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {"url": {"type": "string", "description": "Canvas page or media URL."}},
+            "required": ["url"],
+            "additionalProperties": False,
+        },
+        risk_level="read",
+    )
+    def canvas_access_hint(ctx: ToolContext, url: str):
+        return canvas_media_access_hint(url)
+
+    @registry.tool(
         name="media.probe",
         description=(
             "Inspect a local video/audio file (duration, codecs, streams) with ffprobe. "
@@ -470,6 +674,88 @@ def register_media_tools(registry: ToolRegistry) -> None:
     def transcribe(ctx: ToolContext, path: str, provider: str = "local-whisper", language: str | None = None):
         result = transcribe_media(ctx.app, path, provider=provider, language=language)
         return result.to_dict()
+
+    @registry.tool(
+        name="media.transcribe_and_save",
+        description=(
+            "Transcribe a local media file and immediately save the transcript to the local library. "
+            "This is the recommended demo workflow."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "title": {"type": "string", "description": "Optional transcript title; defaults to the file stem."},
+                "provider": {"type": "string", "default": "local-whisper"},
+                "language": {"type": "string", "description": "Optional language hint, e.g. 'zh' or 'en'."},
+                "description": {"type": "string", "default": ""},
+                "overwrite": {"type": "boolean", "default": False},
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+        risk_level="write",
+        requires_confirmation=True,
+    )
+    def transcribe_and_save(
+        ctx: ToolContext,
+        path: str,
+        title: str | None = None,
+        provider: str = "local-whisper",
+        language: str | None = None,
+        description: str = "",
+        overwrite: bool = False,
+    ):
+        return transcribe_media_and_save(
+            ctx.app,
+            path,
+            title=title,
+            provider=provider,
+            language=language,
+            description=description,
+            overwrite=overwrite,
+        )
+
+    @registry.tool(
+        name="media.transcribe_stream",
+        description=(
+            "Stream an authorized browser-session media URL into a temporary WAV, transcribe it, and save the transcript. "
+            "The source video is never saved locally."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "stream_url": {"type": "string", "description": "Authorized http(s) media stream URL."},
+                "title": {"type": "string"},
+                "provider": {"type": "string", "default": "local-whisper"},
+                "language": {"type": "string", "description": "Optional language hint, e.g. 'zh' or 'en'."},
+                "description": {"type": "string", "default": ""},
+                "overwrite": {"type": "boolean", "default": False},
+            },
+            "required": ["stream_url", "title"],
+            "additionalProperties": False,
+        },
+        risk_level="write",
+        requires_confirmation=True,
+    )
+    def transcribe_stream(
+        ctx: ToolContext,
+        stream_url: str,
+        title: str,
+        provider: str = "local-whisper",
+        language: str | None = None,
+        description: str = "",
+        overwrite: bool = False,
+    ):
+        return transcribe_stream_to_transcript(
+            ctx.app,
+            stream_url,
+            title,
+            provider=provider,
+            language=language,
+            description=description,
+            overwrite=overwrite,
+        )
 
     @registry.tool(
         name="media.save_transcript",
