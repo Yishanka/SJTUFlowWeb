@@ -87,6 +87,15 @@ class MediaSaveTranscriptRequest(BaseModel):
     overwrite: bool = False
 
 
+class TranscriptRenameRequest(BaseModel):
+    title: str
+    overwrite: bool = False
+
+
+class TranscriptSummaryRequest(BaseModel):
+    summary: str | None = None
+
+
 def create_app(*, service: LocalAppService | None = None, frontend_dir: Path | None = None) -> FastAPI:
     app = FastAPI(
         title="SJTUFlow Local API",
@@ -151,9 +160,27 @@ def create_app(*, service: LocalAppService | None = None, frontend_dir: Path | N
     async def transcripts():
         return await run_service(app, "list_transcripts")
 
+    @app.get("/api/transcripts/search")
+    async def search_transcripts(q: str, limit: int = 20):
+        return await run_service(app, "search_transcripts", q, limit=limit)
+
     @app.get("/api/transcripts/{transcript_id}")
     async def transcript(transcript_id: str):
         return await run_service(app, "read_transcript", transcript_id)
+
+    @app.put("/api/transcripts/{transcript_id}")
+    async def rename_transcript(transcript_id: str, request: TranscriptRenameRequest):
+        return await run_service(
+            app, "rename_transcript", transcript_id, request.title, overwrite=request.overwrite
+        )
+
+    @app.delete("/api/transcripts/{transcript_id}")
+    async def delete_transcript(transcript_id: str):
+        return await run_service(app, "delete_transcript", transcript_id)
+
+    @app.post("/api/transcripts/{transcript_id}/summary")
+    async def refresh_transcript_summary(transcript_id: str, request: TranscriptSummaryRequest):
+        return await run_service(app, "refresh_transcript_summary", transcript_id, request.summary)
 
     @app.post("/api/media/probe")
     async def media_probe(request: MediaProbeRequest):
