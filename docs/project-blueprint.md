@@ -15,7 +15,7 @@ uv run sjtuflow web
 
 已完成的基础能力：
 
-- monorepo 结构：`apps/backend` 放 Python 后端和内置 skills，`apps/frontend` 为空前端框架，`docs` 位于仓库根目录。
+- monorepo 结构：`apps/backend` 放 Python 后端和内置 skills，`apps/frontend` 放静态 Web 前端，`docs` 位于仓库根目录。
 - 后端 API：FastAPI 本地服务，提供配置、doctor、briefing、session chat、tools、skills、transcripts 等接口。
 - 历史会话：聊天消息本地保存到 `~/.sjtuflow/sessions/`，前端可恢复或删除历史对话。
 - Agent runtime：OpenAI-compatible tool calling、mock provider、工具循环、审计日志。
@@ -23,11 +23,10 @@ uv run sjtuflow web
 - Skill MVP：只预加载标题和说明，按需通过 `skills.read` 读取全文。
 - Transcript MVP：只预加载标题和说明，按需通过 `transcripts.read` 读取全文，可保存文本 transcript。
 - Media MVP：后端支持本地媒体转写、Canvas 托管浏览器会话解析媒体流并转写，transcript 默认保存到资料库，视频本体不保存。
+- Frontend MVP：静态单页应用，包含控制面板、学习对话、Skills、Transcripts、媒体转写和本地设置。
 
 尚未完成的产品能力：
 
-- 完整前端 UI。
-- 前端媒体入口：本地文件选择、Canvas 托管浏览器登录引导、任务进度展示。
 - 邮箱连接器。
 - 文档抽取、检索索引和课程问答。
 - 可视化权限确认队列。

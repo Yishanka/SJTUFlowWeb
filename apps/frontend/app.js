@@ -30,6 +30,7 @@ const state = {
   transcripts: [],
   transcriptQuery: "",
   selectedTranscript: null,
+  canvasCandidates: [],
   jobs: [],
 };
 
@@ -282,7 +283,7 @@ function topbar() {
     chat: ["学习对话", "继续历史会话，或直接询问作业、公告、资料与转写内容。"],
     skills: ["技能库", "查看内置学习流程，也可以复制后创建自己的本地技能。"],
     transcripts: ["课堂转写库", "浏览、搜索和维护本地转写资料，点击后再按需读取全文。"],
-    media: ["媒体转写任务", "将本地音视频或已授权媒体流转换为课堂转写稿。"],
+    media: ["媒体转写任务", "将本地音视频或 Canvas 课程视频页面转换为课堂转写稿。"],
     settings: ["本地设置", "配置模型、Canvas、资料目录与安全确认策略。"],
   }[state.route] || ["SJTUFlow", "本地优先的学习助手。"];
 
@@ -798,21 +799,43 @@ function mediaView() {
       </section>
       <section class="panel">
         <div class="panel-head">
-          <h2>已授权 Canvas 媒体流</h2>
-          <span class="badge warn">需要登录态</span>
+          <h2>Canvas 课程视频</h2>
+          <span class="badge warn">托管浏览器</span>
         </div>
         <div class="panel-body">
-          <form class="grid" data-form="media-stream">
+          <form class="grid" data-form="media-canvas">
             <div class="field">
-              <label for="stream-url">媒体流 URL</label>
-              <input id="stream-url" name="stream_url" placeholder="https://..." />
+              <label for="canvas-url">Canvas 页面 URL</label>
+              <input id="canvas-url" name="url" placeholder="https://oc.sjtu.edu.cn/courses/.../external_tools/..." />
             </div>
             <div class="field">
-              <label for="stream-title">转写标题</label>
-              <input id="stream-title" name="title" placeholder="Canvas 课程录像" />
+              <label for="canvas-title">转写标题</label>
+              <input id="canvas-title" name="title" placeholder="课程名 + 日期" />
             </div>
-            <button class="button primary" ${isLoading("stream") ? "disabled" : ""}>开始媒体流转写</button>
+            <div class="field">
+              <label for="canvas-description">说明</label>
+              <textarea id="canvas-description" name="description" placeholder="课程、讲次、主题或签到问题备注"></textarea>
+            </div>
+            <button class="button primary" ${isLoading("canvas-media") ? "disabled" : ""}>打开登录态并转写</button>
           </form>
+          <div class="helper-note">首次使用时，SJTUFlow 会打开自己管理的浏览器窗口；请在那个窗口登录 Canvas。不会读取你日常浏览器的 cookie，也不会保存视频本体。</div>
+        </div>
+      </section>
+      <section class="panel span-2">
+        <div class="panel-head">
+          <div>
+            <h2>查找 Canvas 视频页面</h2>
+            <div class="list-meta">只有课程名时，可先用 course id 搜索课程主页/模块页里的 external_tools 候选。</div>
+          </div>
+          ${isLoading("canvas-pages") ? '<span class="badge">查找中</span>' : ""}
+        </div>
+        <div class="panel-body">
+          <form class="toolbar-form" data-form="canvas-pages">
+            <input name="course_id" placeholder="Canvas course id，例如 12345" />
+            <input name="query" placeholder="关键词，例如 6月17日 签到" />
+            <button class="button primary">查找页面</button>
+          </form>
+          ${canvasCandidateList()}
         </div>
       </section>
       <section class="panel span-2">
@@ -822,6 +845,30 @@ function mediaView() {
         </div>
         <div class="panel-body">${jobList()}</div>
       </section>
+    </div>
+  `;
+}
+
+function canvasCandidateList() {
+  if (!state.canvasCandidates.length) {
+    return `<div class="empty">还没有候选页面。也可以直接在上方粘贴 Canvas 课程视频页面 URL。</div>`;
+  }
+  return `
+    <div class="list">
+      ${state.canvasCandidates
+        .map(
+          (item) => `
+            <button class="list-item" data-action="use-canvas-candidate" data-url="${escapeHtml(item.url || "")}" data-title="${escapeHtml(item.title || item.text || "Canvas 课程视频")}">
+              <div class="list-title">${escapeHtml(item.title || item.text || item.display_url || item.url)}</div>
+              <div class="list-meta">${escapeHtml(item.display_url || item.url || "")}</div>
+              <div class="badge-row">
+                ${item.source_page ? `<span class="badge">${escapeHtml(item.source_page)}</span>` : ""}
+                ${Number.isFinite(item.score) ? `<span class="badge good">匹配 ${escapeHtml(item.score)}</span>` : ""}
+              </div>
+            </button>
+          `,
+        )
+        .join("")}
     </div>
   `;
 }
@@ -1172,23 +1219,51 @@ async function startLocalMedia(form) {
   });
 }
 
-async function startStreamMedia(form) {
+async function startCanvasMedia(form) {
   const data = Object.fromEntries(new FormData(form).entries());
-  if (!data.stream_url || !data.title) {
-    notify("Stream URL and title are required.", "error");
+  if (!data.url || !data.title) {
+    notify("Canvas 页面 URL 和标题都需要填写。", "error");
     return;
   }
-  await loadResource("stream", async () => {
-    await api("/api/media/transcribe-stream", {
+  await loadResource("canvas-media", async () => {
+    await api("/api/media/transcribe-canvas-page", {
       method: "POST",
       body: JSON.stringify({
-        stream_url: data.stream_url,
+        url: data.url,
         title: data.title,
+        description: data.description || "",
+        language: "zh",
         sync: false,
       }),
     });
     await loadJobs(false);
-    notify("Stream transcript job started.");
+    notify("Canvas 转写任务已开始；如需登录，请在 SJTUFlow 打开的浏览器窗口完成登录后重试。");
+  });
+}
+
+async function findCanvasPages(form) {
+  const data = Object.fromEntries(new FormData(form).entries());
+  if (!data.course_id) {
+    notify("Canvas course id is required.", "error");
+    return;
+  }
+  await loadResource("canvas-pages", async () => {
+    const result = await api("/api/media/find-canvas-pages", {
+      method: "POST",
+      body: JSON.stringify({
+        course_id: data.course_id,
+        query: data.query || "",
+        max_candidates: 12,
+      }),
+    });
+    state.canvasCandidates = result.candidates || [];
+    if (result.requires_browser_login) {
+      notify("请在 SJTUFlow 打开的浏览器窗口登录 Canvas，然后重新查找。", "error");
+    } else if (!state.canvasCandidates.length) {
+      notify(result.message || "没有找到 Canvas 视频候选页面。", "error");
+    } else {
+      notify(`找到 ${state.canvasCandidates.length} 个候选页面。`);
+    }
   });
 }
 
@@ -1225,6 +1300,13 @@ document.addEventListener("click", (event) => {
   if (action === "refresh-transcripts") loadTranscripts();
   if (action === "refresh-jobs") loadJobs();
   if (action === "save-settings") saveSettings();
+  if (action === "use-canvas-candidate") {
+    const urlInput = document.querySelector("#canvas-url");
+    const titleInput = document.querySelector("#canvas-title");
+    if (urlInput) urlInput.value = actionTarget.dataset.url || "";
+    if (titleInput && !titleInput.value) titleInput.value = actionTarget.dataset.title || "";
+    notify("已填入候选 Canvas 页面。");
+  }
   if (action === "use-prompt") {
     const input = document.querySelector(".composer textarea");
     if (input) {
@@ -1242,7 +1324,8 @@ document.addEventListener("submit", (event) => {
   if (formName === "chat") sendMessage(form);
   if (formName === "transcript-search") searchTranscripts(form);
   if (formName === "media-local") startLocalMedia(form);
-  if (formName === "media-stream") startStreamMedia(form);
+  if (formName === "media-canvas") startCanvasMedia(form);
+  if (formName === "canvas-pages") findCanvasPages(form);
 });
 
 render();

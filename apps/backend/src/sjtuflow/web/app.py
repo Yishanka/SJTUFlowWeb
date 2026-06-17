@@ -382,10 +382,17 @@ def create_app(*, service: LocalAppService | None = None, frontend_dir: Path | N
     async def clear_session(session_id: str, request: ClearSessionRequest):
         return await run_service(app, "clear_session", session_id, run_briefing=request.run_briefing)
 
-    resolved_frontend = frontend_dir or default_frontend_dist()
+    resolved_frontend = frontend_dir or default_frontend_dir()
     assets_dir = resolved_frontend / "assets"
     if assets_dir.exists():
         app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+    for asset_name in ("app.js", "styles.css"):
+        asset_path = resolved_frontend / asset_name
+        if asset_path.exists():
+            @app.get(f"/{asset_name}", include_in_schema=False)
+            async def frontend_asset(path: Path = asset_path):
+                return FileResponse(path)
 
     @app.get("/")
     async def index():
@@ -394,7 +401,7 @@ def create_app(*, service: LocalAppService | None = None, frontend_dir: Path | N
             return FileResponse(index_path)
         return {
             "ok": True,
-            "message": "SJTUFlow API is running. Frontend has not been implemented yet.",
+            "message": "SJTUFlow API is running. Frontend files were not found; run from the repo root or build apps/frontend.",
             "api": "/api/health",
         }
 
@@ -427,6 +434,13 @@ def repo_root() -> Path:
 
 def default_frontend_dist() -> Path:
     return repo_root() / "apps" / "frontend" / "dist"
+
+
+def default_frontend_dir() -> Path:
+    dist = default_frontend_dist()
+    if (dist / "index.html").exists():
+        return dist
+    return repo_root() / "apps" / "frontend"
 
 
 app = create_app()

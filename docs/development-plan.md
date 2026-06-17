@@ -5,26 +5,26 @@
 本仓库已经从 CLI 项目调整为本地 Web monorepo：
 
 - 后端在 `apps/backend/src/sjtuflow`。
-- 前端在 `apps/frontend`，目前仅保留空框架。
+- 前端在 `apps/frontend`，当前是零依赖静态单页应用。
 - 内置 skills 在 `apps/backend/src/sjtuflow/builtin_skills`，用户 skills 在 `~/.sjtuflow/skills`。
 - `uv run sjtuflow web` 可启动本地 API。
 - CLI、MCP、mock provider、Canvas、filesystem、skills、transcripts 工具仍可作为开发入口使用。
 
-下一阶段目标不是再扩展 CLI，而是把浏览器端体验补完整，并补齐视频/transcript/skill 相关工具。
+下一阶段目标不是再扩展 CLI，而是完善浏览器端确认队列、端到端媒体体验和更多课程工具。
 
-## 阶段 1：前端最小可用
+## 阶段 1：前端最小可用（已完成 MVP）
 
 目标：用户能在浏览器里完成首次配置、查看 briefing、发起对话。
 
-开发内容：
+已实现内容：
 
-- 选定前端栈，建议 Vite + React + TypeScript。
-- 实现首次配置页，对接 `GET/PUT /api/config` 和 `GET /api/doctor`。
-- 实现首页 briefing 区块，对接 `GET /api/briefing`。
-- 实现会话工作区，对接 `POST /api/sessions` 和 `POST /api/sessions/{id}/messages`。
-- 实现历史会话列表，对接 `GET /api/sessions`、`GET /api/sessions/{id}`、`DELETE /api/sessions/{id}`。
-- 实现 Skills 和 Transcripts 侧栏，只显示标题与说明，点击后再读取全文。
-- 实现创建 skill 按钮和编辑表单，写入用户本地 skill 目录。
+- 零依赖静态 SPA，后端可直接托管 `apps/frontend` 或 `apps/frontend/dist`。
+- 本地设置页，对接 `GET/PUT /api/config` 和 `GET /api/doctor`。
+- 控制面板展示 briefing。
+- 学习对话工作区和历史会话列表。
+- Skills 和 Transcripts metadata-first 列表，点击后读取全文。
+- 用户 skill 创建、复制、编辑、删除入口。
+- 媒体页支持本地媒体转写、Canvas 课程视频页面转写、Canvas external_tools 候选页查找。
 
 交付标准：
 

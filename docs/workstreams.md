@@ -4,18 +4,18 @@
 
 ## A. 前端完整体验
 
-负责人目标：把 `apps/frontend` 从空框架实现为本地 Web 应用。
+负责人目标：维护 `apps/frontend` 本地 Web 应用，并继续补齐确认队列、状态展示和交互细节。
 
 开发位置：`apps/frontend/`。
 
 页面：
 
-- First-run config：模型配置、Canvas token、资料目录、权限策略。
 - Dashboard：briefing 分块展示。
 - Chat workspace：历史会话列表、消息流、工具状态。
 - Skills：metadata 列表、全文查看、创建/编辑入口，区分内置 skill 与用户 skill。
-- Transcripts：metadata 列表、全文查看、上传/转写入口。
-- Settings：配置、doctor、数据目录、审计日志入口。
+- Transcripts：metadata 列表、全文查看、搜索、重命名、删除、摘要刷新。
+- Media：本地媒体转写、Canvas 课程视频页面转写、Canvas external_tools 候选页查找。
+- Settings：模型配置、Canvas token、资料目录、权限策略、doctor。
 
 接口：
 
@@ -35,6 +35,10 @@
 - `DELETE /api/skills/{name}`
 - `GET /api/transcripts`
 - `GET /api/transcripts/{transcript_id}`
+- `POST /api/media/find-canvas-pages`
+- `POST /api/media/transcribe-canvas-page`
+- `POST /api/media/transcribe-and-save`
+- `GET /api/jobs`
 
 要求：
 

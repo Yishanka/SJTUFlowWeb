@@ -20,18 +20,18 @@ uv run sjtuflow web
 http://127.0.0.1:8765
 ```
 
-当前前端仍是空框架，所以页面会先显示 API running 信息。后续前端完成后，用户应直接在浏览器内填写模型、Canvas token、资料目录和权限设置，然后在浏览器里完成工作。
+页面会打开本地 Web 工作台，用户可以在浏览器内填写模型、Canvas token、资料目录和权限设置，然后完成 briefing、对话、skill、transcript 和媒体转写工作。
 
 ## 使用方式
 
-前端完成后的默认流程：
+默认流程：
 
 1. 启动应用。
 2. 在浏览器首次配置模型和 Canvas。
 3. 进入首页查看 startup briefing。
 4. 在工作区对话，例如“这周有哪些作业？”。
 5. 在侧栏管理 Skills 和 Transcripts。
-6. 转写本地视频或已授权的 Canvas 媒体流，并默认保存 transcript 到资料库。
+6. 转写本地视频或 Canvas 课程视频页面，并默认保存 transcript 到资料库。
 
 Canvas 课程视频的推荐流程：
 
@@ -78,13 +78,12 @@ Transcripts 默认保存在 `~/SJTUFlowData/transcripts/`。
 - Skill metadata-first 加载。
 - Transcript metadata-first 加载与文本保存。
 - 后端媒体工具：本地媒体转写、Canvas 托管浏览器会话解析媒体流、transcript 默认入库。
+- 静态前端 MVP：控制面板、学习对话、Skills、Transcripts、媒体转写和本地设置。
 - CLI 作为开发和备用入口。
 
 待完成：
 
-- 完整前端界面。
 - Web 端写操作确认队列。
-- 前端媒体入口：本地文件选择、Canvas 托管浏览器登录引导、任务进度展示。
 - 更多内置 `SKILL.md`。
 - 可选邮箱工具。
 

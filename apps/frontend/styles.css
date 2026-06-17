@@ -366,13 +366,14 @@ button {
 
 .toolbar-form {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 0.6fr) auto;
   gap: 8px;
   margin-bottom: 14px;
 }
 
 .toolbar-form input {
   min-width: 0;
+  min-height: 40px;
   border: 1px solid var(--line);
   border-radius: 7px;
   background: #ffffff;
@@ -384,6 +385,13 @@ button {
 .toolbar-form input:focus {
   border-color: var(--link);
   box-shadow: 0 0 0 3px rgba(31, 120, 189, 0.12);
+}
+
+.helper-note {
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
 }
 
 .detail-actions {
@@ -879,6 +887,7 @@ button {
 
   .grid.two,
   .grid.three,
+  .toolbar-form,
   .chat-layout,
   .split-view,
   .prompt-grid {
