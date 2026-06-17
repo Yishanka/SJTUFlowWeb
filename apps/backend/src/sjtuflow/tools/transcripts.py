@@ -81,7 +81,7 @@ def _metadata_for_file(root: Path, path: Path) -> dict[str, Any]:
     text = _read_text(path)
     json_meta = _extract_json_metadata(path, text) if path.suffix.lower() == ".json" else {}
     title = json_meta.get("title") or path.stem.replace("-", " ").replace("_", " ").strip() or path.name
-    description = json_meta.get("description") or _read_summary_cache(root, path) or truncate_text(" ".join(text.split()), 500)
+    description = _read_summary_cache(root, path) or json_meta.get("description") or truncate_text(" ".join(text.split()), 500)
     try:
         relative_path = str(path.relative_to(root))
     except ValueError:

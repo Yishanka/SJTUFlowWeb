@@ -65,6 +65,22 @@ def test_refresh_summary_cache_updates_listing_description(tmp_path):
     assert listed["description"] == "Short cached summary"
 
 
+def test_refresh_summary_cache_overrides_saved_media_description(tmp_path):
+    app = _app(tmp_path)
+    save_transcript(
+        app,
+        title="Media Summary Lecture",
+        description="original media description",
+        segments=[{"start": 0, "end": 3, "text": "teacher mentioned sign in"}],
+    )
+    item = next(item for item in list_transcript_metadata(app) if item["title"] == "Media Summary Lecture")
+
+    refresh_transcript_summary(app, item["id"], "cached sign-in summary")
+    listed = next(item for item in list_transcript_metadata(app) if item["title"] == "Media Summary Lecture")
+
+    assert listed["description"] == "cached sign-in summary"
+
+
 def test_rename_transcript_moves_pair_and_updates_titles(tmp_path):
     app = _app(tmp_path)
     save_transcript(app, title="Old Lecture", segments=[{"start": 0, "end": 3, "text": "body"}])
