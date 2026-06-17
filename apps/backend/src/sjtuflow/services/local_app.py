@@ -200,6 +200,26 @@ class LocalAppService:
 
         return read_transcript_by_id(self.app_context(), transcript_id)
 
+    def search_transcripts(self, query: str, *, limit: int = 20) -> list[dict[str, Any]]:
+        from sjtuflow.tools.transcripts import search_transcripts
+
+        return search_transcripts(self.app_context(), query, limit=limit)
+
+    def refresh_transcript_summary(self, transcript_id: str, summary: str | None = None) -> dict[str, Any]:
+        from sjtuflow.tools.transcripts import refresh_transcript_summary
+
+        return refresh_transcript_summary(self.app_context(), transcript_id, summary)
+
+    def delete_transcript(self, transcript_id: str) -> dict[str, Any]:
+        from sjtuflow.tools.transcripts import delete_transcript
+
+        return delete_transcript(self.app_context(), transcript_id)
+
+    def rename_transcript(self, transcript_id: str, title: str, *, overwrite: bool = False) -> dict[str, Any]:
+        from sjtuflow.tools.transcripts import rename_transcript
+
+        return rename_transcript(self.app_context(), transcript_id, title, overwrite=overwrite)
+
     # --- Media: probe / extract / transcribe / save ----------------------- #
 
     def media_probe(self, path: str) -> dict[str, Any]:
