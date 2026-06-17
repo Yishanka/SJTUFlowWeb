@@ -56,11 +56,13 @@
 
 ```text
 media.canvas_access_hint(url: str)
+media.resolve_stream(source: str)
 media.probe(path: str)
 media.extract_audio(path: str, out_dir: str | None = None)
 media.transcribe(path: str, provider: str = "local-whisper", language: str | None = None)
 media.transcribe_and_save(path: str, title: str | None = None, provider: str = "local-whisper", language: str | None = None)
 media.transcribe_stream(stream_url: str, title: str, provider: str = "local-whisper", language: str | None = None)
+media.transcribe_source(source: str, title: str, provider: str = "local-whisper", language: str | None = None)
 media.save_transcript(title: str, content: str, source: str = "", description: str = "")
 ```
 
@@ -68,11 +70,13 @@ media.save_transcript(title: str, content: str, source: str = "", description: s
 
 ```text
 POST /api/media/canvas-access-hint
+POST /api/media/resolve-stream
 POST /api/media/probe
 POST /api/media/extract-audio
 POST /api/media/transcribe
 POST /api/media/transcribe-and-save
 POST /api/media/transcribe-stream
+POST /api/media/transcribe-source
 POST /api/media/save-transcript
 GET  /api/jobs/{job_id}
 ```
@@ -80,7 +84,8 @@ GET  /api/jobs/{job_id}
 实现要求：
 
 - 优先处理用户主动提供的本地文件。
-- SJTU Canvas `external_tools` 媒体页通常不能只靠 Canvas token 抓取；需要用户在浏览器里保持登录态，由前端提供已授权的媒体 stream URL 或同源请求头。
+- SJTU Canvas `external_tools` 媒体页通常不能只靠 Canvas token 抓取；需要用户在浏览器里保持登录态，由前端或用户提供已授权的媒体 stream URL、已登录 HTML 片段/文件，或同源请求头。
+- 后端可用 `media.resolve_stream` 从 `<video src="...">` 片段、本地 HTML 文件或直接媒体 URL 中解析候选流；返回给 agent/API 时必须脱敏签名参数。
 - 模型回复时要明确说明这个限制，不要暗示可以绕过认证。
 - 不绕过视频平台 DRM、验证码或权限限制。
 - 大文件/转写走 job 状态，不阻塞 HTTP 请求。
@@ -94,9 +99,8 @@ GET  /api/jobs/{job_id}
 1. 用户问“今天 xxx 课程中老师是否提到有签到？”。
 2. Agent 先调用 `transcripts.list` 查本地资料库是否已有今天该课程的 transcript。
 3. 如果已有，按需 `transcripts.read` 读取全文并回答。
-4. 如果没有，前端引导用户打开 SJTU Canvas 对应 `https://oc.sjtu.edu.cn/courses/<course_id>/external_tools/<tool_id>` 页面并保持登录。
-5. 前端从登录态页面解析已授权的 `stream_url`，或把同会话请求头转交给本地后端。
-6. 后端调用 `POST /api/media/transcribe-stream`，用 ffmpeg 流式抽取临时音频，转写完成后默认保存 transcript 到 `~/SJTUFlowData/transcripts/`。
+4. 如果没有，agent 使用 `lecture-signin-check` skill：若用户只给 Canvas external_tools URL，先说明需要浏览器登录态；若用户提供已登录页面 HTML 片段/文件或授权媒体 URL，则调用 `media.resolve_stream`。
+5. 后端调用 `POST /api/media/transcribe-source` 或 `media.transcribe_source`，解析来源、用 ffmpeg 流式抽取临时音频，转写完成后默认保存 transcript 到 `~/SJTUFlowData/transcripts/`。
 7. Agent 再按 metadata-first 规则读取新 transcript，回答是否提到签到，并指出来源 transcript。
 
 本地视频模式：

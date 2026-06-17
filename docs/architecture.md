@@ -74,11 +74,13 @@ apps/frontend/
 | GET | `/api/transcripts` | 列出 transcript 标题和说明 |
 | GET | `/api/transcripts/{id}` | 按需读取完整 transcript |
 | POST | `/api/media/canvas-access-hint` | 说明 Canvas external_tools 媒体页的登录态要求 |
+| POST | `/api/media/resolve-stream` | 从 HTML 片段/本地 HTML/媒体 URL 解析脱敏流候选 |
 | POST | `/api/media/probe` | 读取本地媒体元数据 |
 | POST | `/api/media/extract-audio` | 从本地媒体提取音频 |
 | POST | `/api/media/transcribe` | 本地媒体转写，返回内存结果 |
 | POST | `/api/media/transcribe-and-save` | 本地媒体转写并默认保存 transcript |
 | POST | `/api/media/transcribe-stream` | 已授权媒体流转写并默认保存 transcript |
+| POST | `/api/media/transcribe-source` | 解析来源并转写保存 transcript |
 | POST | `/api/media/save-transcript` | 保存 transcript JSON/Markdown |
 | GET | `/api/jobs` | 列出后台任务 |
 | GET | `/api/jobs/{id}` | 查询后台任务状态 |
@@ -133,7 +135,7 @@ Transcript：
 - `transcripts.list` 和 Web `/api/transcripts` 只返回 `id/title/description/path/source/duration`。
 - 模型需要全文时调用 `transcripts.read`。
 - 转写结果保存为 JSON 和 Markdown，默认在 `~/SJTUFlowData/transcripts/`。
-- 媒体流转写不保存视频本体，只保留 transcript；Canvas `external_tools` 媒体页需要浏览器登录态提供已授权 stream URL。
+- 媒体流转写不保存视频本体，只保留 transcript；Canvas `external_tools` 媒体页需要浏览器登录态提供已授权 stream URL、HTML 片段或同会话请求头。对外展示时必须脱敏签名 URL。
 
 ## 数据目录
 

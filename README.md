@@ -61,14 +61,14 @@ Transcripts 默认保存在 `~/SJTUFlowData/transcripts/`。
 - Canvas 读取与文件下载工具。
 - Skill metadata-first 加载。
 - Transcript metadata-first 加载与文本保存。
-- 后端媒体工具：本地媒体转写、已授权媒体流转写、transcript 默认入库。
+- 后端媒体工具：本地媒体转写、已授权媒体流/已登录 HTML 片段解析转写、transcript 默认入库。
 - CLI 作为开发和备用入口。
 
 待完成：
 
 - 完整前端界面。
 - Web 端写操作确认队列。
-- 前端媒体入口：本地文件选择、Canvas 登录态页面解析、任务进度展示。
+- 前端媒体入口：本地文件选择、Canvas 登录态页面自动解析、任务进度展示。
 - 更多内置 `SKILL.md`。
 - 可选邮箱工具。
 

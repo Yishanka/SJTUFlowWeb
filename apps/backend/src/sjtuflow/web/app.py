@@ -43,6 +43,11 @@ class MediaAccessHintRequest(BaseModel):
     url: str
 
 
+class MediaResolveStreamRequest(BaseModel):
+    source: str
+    request_headers: dict[str, str] | None = None
+
+
 class MediaExtractAudioRequest(BaseModel):
     path: str
     out_dir: str | None = None
@@ -68,6 +73,17 @@ class MediaTranscribeAndSaveRequest(BaseModel):
 
 class MediaTranscribeStreamRequest(BaseModel):
     stream_url: str
+    title: str
+    provider: str = "local-whisper"
+    language: str | None = None
+    description: str = ""
+    overwrite: bool = False
+    sync: bool = False
+    request_headers: dict[str, str] | None = None
+
+
+class MediaTranscribeSourceRequest(BaseModel):
+    source: str
     title: str
     provider: str = "local-whisper"
     language: str | None = None
@@ -190,6 +206,15 @@ def create_app(*, service: LocalAppService | None = None, frontend_dir: Path | N
     async def media_canvas_access_hint(request: MediaAccessHintRequest):
         return await run_service(app, "media_canvas_access_hint", request.url)
 
+    @app.post("/api/media/resolve-stream")
+    async def media_resolve_stream(request: MediaResolveStreamRequest):
+        return await run_service(
+            app,
+            "media_resolve_stream",
+            request.source,
+            request_headers=request.request_headers,
+        )
+
     @app.post("/api/media/extract-audio")
     async def media_extract_audio(request: MediaExtractAudioRequest):
         return await run_service(
@@ -227,6 +252,21 @@ def create_app(*, service: LocalAppService | None = None, frontend_dir: Path | N
             app,
             "media_transcribe_stream",
             request.stream_url,
+            request.title,
+            request.provider,
+            request.language,
+            request.description,
+            overwrite=request.overwrite,
+            request_headers=request.request_headers,
+            sync=request.sync,
+        )
+
+    @app.post("/api/media/transcribe-source")
+    async def media_transcribe_source(request: MediaTranscribeSourceRequest):
+        return await run_service(
+            app,
+            "media_transcribe_source",
+            request.source,
             request.title,
             request.provider,
             request.language,

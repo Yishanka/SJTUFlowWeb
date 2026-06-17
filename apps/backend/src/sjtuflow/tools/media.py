@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from html import unescape
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse, urlunparse
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
 
 from sjtuflow.runtime import AppContext
 from sjtuflow.tools.registry import ToolContext, ToolRegistry
@@ -21,7 +26,12 @@ from sjtuflow.utils.text import sanitize_filename
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".flv", ".m4v", ".wmv", ".mpg", ".mpeg"}
 AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".wma"}
 MEDIA_EXTENSIONS = VIDEO_EXTENSIONS | AUDIO_EXTENSIONS
+STREAM_EXTENSIONS = MEDIA_EXTENSIONS | {".m3u8", ".mpd"}
 SJTU_CANVAS_HOST = "oc.sjtu.edu.cn"
+MEDIA_URL_PATTERN = re.compile(
+    r"https?://[^\s\"'<>\\]+?(?:\.m3u8|\.mpd|\.mp4|\.m4v|\.mov|\.webm|\.mp3|\.m4a|\.aac|\.wav)(?:\?[^\s\"'<>\\]*)?",
+    re.IGNORECASE,
+)
 
 CANVAS_MEDIA_LOGIN_MESSAGE = (
     "SJTU Canvas external_tools media pages usually cannot be fetched with a Canvas API token alone. "
@@ -33,6 +43,19 @@ CANVAS_MEDIA_LOGIN_MESSAGE = (
 
 class MediaError(RuntimeError):
     """Raised for recoverable media-processing problems (missing tools, bad input)."""
+
+
+class _MediaHTMLParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.candidates: list[tuple[str, str, str]] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attr_map = {name.lower(): value or "" for name, value in attrs}
+        for attr_name in ("src", "data-src", "href"):
+            value = attr_map.get(attr_name)
+            if value:
+                self.candidates.append((tag.lower(), attr_name, unescape(value)))
 
 
 # --------------------------------------------------------------------------- #
@@ -164,6 +187,171 @@ def _validate_stream_url(url: str) -> None:
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise MediaError("stream_url must be an authorized http(s) media URL from the logged-in frontend session.")
+
+
+def _is_probable_stream_url(value: str) -> bool:
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return False
+    suffix = Path(parsed.path).suffix.lower()
+    return suffix in STREAM_EXTENSIONS
+
+
+def _redact_url(url: str) -> str:
+    parsed = urlparse(url)
+    if not parsed.query:
+        return url
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, "***", parsed.fragment))
+
+
+def safe_resolution_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    safe = dict(payload)
+    stream_url = str(safe.pop("stream_url", "") or "")
+    safe["stream_url_available"] = bool(stream_url)
+    safe["display_url"] = _redact_url(stream_url) if stream_url else str(safe.get("display_url") or "")
+    safe["source"] = "<omitted>"
+    safe_candidates: list[dict[str, Any]] = []
+    for candidate in safe.get("candidates") or []:
+        item = dict(candidate)
+        candidate_url = str(item.pop("stream_url", "") or "")
+        item["stream_url_available"] = bool(candidate_url)
+        item["display_url"] = _redact_url(candidate_url) if candidate_url else str(item.get("display_url") or "")
+        safe_candidates.append(item)
+    safe["candidates"] = safe_candidates
+    return safe
+
+
+def _metadata_without_transcript(payload: dict[str, Any]) -> dict[str, Any]:
+    safe = {key: value for key, value in payload.items() if key != "transcript"}
+    if "stream_url" in safe:
+        safe["display_url"] = _redact_url(str(safe.pop("stream_url") or ""))
+    return safe
+
+
+def _source_kind(value: str) -> str:
+    parsed = urlparse(value)
+    if parsed.scheme in {"http", "https"}:
+        return "url"
+    if "<" in value and ">" in value:
+        return "html"
+    return "path_or_html"
+
+
+def _fetch_authorized_html(url: str, request_headers: dict[str, str] | None = None) -> str:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        raise MediaError("page_url must be http(s)")
+    headers = {
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "User-Agent": "SJTUFlow/0.1",
+    }
+    headers.update(request_headers or {})
+    request = Request(url, headers=headers, method="GET")
+    try:
+        with urlopen(request, timeout=30) as response:
+            payload = response.read()
+            charset = response.headers.get_content_charset() or "utf-8"
+            return payload.decode(charset, errors="replace")
+    except HTTPError as exc:
+        if exc.code in {401, 403}:
+            raise MediaError("Media page requires a logged-in browser session or valid same-session headers.") from exc
+        raise MediaError(f"Media page fetch failed with HTTP {exc.code}") from exc
+    except URLError as exc:
+        raise MediaError(f"Media page fetch failed: {exc.reason}") from exc
+
+
+def _candidate_record(url: str, *, source: str, tag: str = "", attr: str = "") -> dict[str, Any]:
+    parsed = urlparse(url)
+    return {
+        "stream_url": url,
+        "display_url": _redact_url(url),
+        "host": parsed.hostname or parsed.netloc,
+        "extension": Path(parsed.path).suffix.lower(),
+        "source": source,
+        "tag": tag,
+        "attribute": attr,
+    }
+
+
+def _extract_stream_candidates(html: str, *, base_url: str = "") -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add(value: str, *, source: str, tag: str = "", attr: str = "") -> None:
+        absolute = urljoin(base_url, unescape(value.strip()))
+        if not _is_probable_stream_url(absolute) or absolute in seen:
+            return
+        seen.add(absolute)
+        candidates.append(_candidate_record(absolute, source=source, tag=tag, attr=attr))
+
+    parser = _MediaHTMLParser()
+    parser.feed(html)
+    for tag, attr, value in parser.candidates:
+        add(value, source="html_attr", tag=tag, attr=attr)
+    for match in MEDIA_URL_PATTERN.finditer(html):
+        add(match.group(0), source="inline_text")
+    return candidates
+
+
+def resolve_media_stream(
+    app: AppContext,
+    source: str,
+    *,
+    request_headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Resolve a local HTML snippet/page URL/direct stream URL into media stream candidates."""
+
+    value = source.strip()
+    if not value:
+        raise ValueError("source is required")
+    kind = _source_kind(value)
+    parsed = urlparse(value)
+    html = ""
+    base_url = ""
+    status = "resolved"
+
+    if _is_probable_stream_url(value):
+        candidates = [_candidate_record(value, source="direct_url")]
+    elif kind == "url":
+        hint = canvas_media_access_hint(value)
+        if hint["requires_browser_login"] and not request_headers:
+            return {
+                **hint,
+                "status": "requires_browser_session",
+                "source_kind": "canvas_external_tool_page",
+                "candidates": [],
+            }
+        html = _fetch_authorized_html(value, request_headers=request_headers)
+        base_url = value
+        candidates = _extract_stream_candidates(html, base_url=base_url)
+        if not candidates:
+            status = "no_stream_found"
+    else:
+        try:
+            path = app.workspace.resolve_read_path(value)
+            if path.exists() and path.is_file():
+                html = path.read_text(encoding="utf-8", errors="replace")
+                base_url = ""
+            else:
+                html = value
+        except ValueError:
+            html = value
+        candidates = _extract_stream_candidates(html, base_url=base_url)
+        if not candidates:
+            status = "no_stream_found"
+
+    primary = candidates[0]["stream_url"] if candidates else ""
+    return {
+        "status": status,
+        "source": source,
+        "source_kind": kind,
+        "stream_url": primary,
+        "display_url": _redact_url(primary) if primary else "",
+        "candidates": candidates,
+        "requires_browser_login": False,
+        "video_saved_locally": False,
+        "transcript_saved_by_default": True,
+    }
 
 
 def probe_media(app: AppContext, path: str) -> dict[str, Any]:
@@ -467,29 +655,80 @@ def transcribe_stream_to_transcript(
             language=language,
             progress=lambda fraction, message: report(0.45 + fraction * 0.45, message),
         )
-        result.source = stream_url
+        redacted_stream_url = _redact_url(stream_url)
+        result.source = redacted_stream_url
         report(0.95, "Saving transcript")
         metadata = save_transcript(
             app,
             title,
             result.text,
-            source=stream_url,
+            source=redacted_stream_url,
             description=description,
             segments=[segment.to_dict() for segment in result.segments],
             language=result.language,
             overwrite=overwrite,
         )
         metadata["transcript"] = result.to_dict()
-        metadata["stream_url"] = stream_url
+        metadata["display_url"] = _redact_url(stream_url)
         metadata["video_saved_locally"] = False
         app.audit.record(
             "media_transcribe_stream",
-            {"source": stream_url, "title": title, "provider": result.provider, "segments": len(result.segments)},
+            {
+                "source": redacted_stream_url,
+                "title": title,
+                "provider": result.provider,
+                "segments": len(result.segments),
+            },
         )
         report(1.0, "Done")
         return metadata
     finally:
         _cleanup_temp_file(temp_audio)
+
+
+def transcribe_resolved_media_source(
+    app: AppContext,
+    source: str,
+    title: str,
+    provider: str = "local-whisper",
+    language: str | None = None,
+    description: str = "",
+    *,
+    overwrite: bool = False,
+    request_headers: dict[str, str] | None = None,
+    progress: Callable[[float, str], None] | None = None,
+) -> dict[str, Any]:
+    """Resolve a page/snippet/direct URL, then stream-transcribe and save the transcript."""
+
+    def report(fraction: float, message: str) -> None:
+        if progress is not None:
+            progress(fraction, message)
+
+    report(0.02, "Resolving media source")
+    resolved = resolve_media_stream(app, source, request_headers=request_headers)
+    stream_url = resolved.get("stream_url") or ""
+    if not stream_url:
+        if resolved.get("status") == "requires_browser_session":
+            raise MediaError(CANVAS_MEDIA_LOGIN_MESSAGE)
+        raise MediaError("No media stream URL found in the provided source.")
+
+    result = transcribe_stream_to_transcript(
+        app,
+        stream_url,
+        title,
+        provider=provider,
+        language=language,
+        description=description,
+        overwrite=overwrite,
+        request_headers=request_headers,
+        progress=lambda fraction, message: report(0.05 + fraction * 0.95, message),
+    )
+    result["resolved_media"] = {
+        "source_kind": resolved.get("source_kind"),
+        "display_url": resolved.get("display_url"),
+        "candidate_count": len(resolved.get("candidates") or []),
+    }
+    return result
 
 
 # --------------------------------------------------------------------------- #
@@ -618,6 +857,28 @@ def register_media_tools(registry: ToolRegistry) -> None:
         return canvas_media_access_hint(url)
 
     @registry.tool(
+        name="media.resolve_stream",
+        description=(
+            "Resolve a direct media URL, local HTML snippet/file, or authorized media page into stream URL candidates. "
+            "Canvas external_tools pages still require browser session headers or pasted logged-in HTML."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "source": {
+                    "type": "string",
+                    "description": "Direct stream URL, local HTML snippet/path, or authorized media page URL.",
+                }
+            },
+            "required": ["source"],
+            "additionalProperties": False,
+        },
+        risk_level="read",
+    )
+    def resolve_stream(ctx: ToolContext, source: str):
+        return safe_resolution_payload(resolve_media_stream(ctx.app, source))
+
+    @registry.tool(
         name="media.probe",
         description=(
             "Inspect a local video/audio file (duration, codecs, streams) with ffprobe. "
@@ -706,7 +967,7 @@ def register_media_tools(registry: ToolRegistry) -> None:
         description: str = "",
         overwrite: bool = False,
     ):
-        return transcribe_media_and_save(
+        result = transcribe_media_and_save(
             ctx.app,
             path,
             title=title,
@@ -715,6 +976,7 @@ def register_media_tools(registry: ToolRegistry) -> None:
             description=description,
             overwrite=overwrite,
         )
+        return _metadata_without_transcript(result)
 
     @registry.tool(
         name="media.transcribe_stream",
@@ -747,7 +1009,7 @@ def register_media_tools(registry: ToolRegistry) -> None:
         description: str = "",
         overwrite: bool = False,
     ):
-        return transcribe_stream_to_transcript(
+        result = transcribe_stream_to_transcript(
             ctx.app,
             stream_url,
             title,
@@ -756,6 +1018,52 @@ def register_media_tools(registry: ToolRegistry) -> None:
             description=description,
             overwrite=overwrite,
         )
+        return _metadata_without_transcript(result)
+
+    @registry.tool(
+        name="media.transcribe_source",
+        description=(
+            "Resolve a direct stream URL or logged-in HTML snippet/file, then stream-transcribe and save the transcript. "
+            "Use this when the user has provided a pasted Canvas video element or an authorized media URL."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "source": {
+                    "type": "string",
+                    "description": "Direct stream URL, local HTML snippet/path, or authorized media page URL.",
+                },
+                "title": {"type": "string"},
+                "provider": {"type": "string", "default": "local-whisper"},
+                "language": {"type": "string", "description": "Optional language hint, e.g. 'zh' or 'en'."},
+                "description": {"type": "string", "default": ""},
+                "overwrite": {"type": "boolean", "default": False},
+            },
+            "required": ["source", "title"],
+            "additionalProperties": False,
+        },
+        risk_level="write",
+        requires_confirmation=True,
+    )
+    def transcribe_source(
+        ctx: ToolContext,
+        source: str,
+        title: str,
+        provider: str = "local-whisper",
+        language: str | None = None,
+        description: str = "",
+        overwrite: bool = False,
+    ):
+        result = transcribe_resolved_media_source(
+            ctx.app,
+            source,
+            title,
+            provider=provider,
+            language=language,
+            description=description,
+            overwrite=overwrite,
+        )
+        return _metadata_without_transcript(result)
 
     @registry.tool(
         name="media.save_transcript",

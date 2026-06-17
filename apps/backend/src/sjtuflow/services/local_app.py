@@ -297,6 +297,16 @@ class LocalAppService:
 
         return canvas_media_access_hint(url)
 
+    def media_resolve_stream(
+        self,
+        source: str,
+        *,
+        request_headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        from sjtuflow.tools.media import resolve_media_stream, safe_resolution_payload
+
+        return safe_resolution_payload(resolve_media_stream(self.app_context(), source, request_headers=request_headers))
+
     def media_transcribe_stream(
         self,
         stream_url: str,
@@ -329,6 +339,39 @@ class LocalAppService:
 
         runner = self.jobs.run_sync if sync else self.jobs.submit
         return runner("media.transcribe_stream", worker)
+
+    def media_transcribe_source(
+        self,
+        source: str,
+        title: str,
+        provider: str = "local-whisper",
+        language: str | None = None,
+        description: str = "",
+        *,
+        overwrite: bool = False,
+        request_headers: dict[str, str] | None = None,
+        sync: bool = False,
+    ) -> dict[str, Any]:
+        from sjtuflow.tools.media import transcribe_resolved_media_source
+
+        def worker(handle: JobHandle) -> dict[str, Any]:
+            def progress(fraction: float, message: str) -> None:
+                handle.update(progress=fraction, message=message)
+
+            return transcribe_resolved_media_source(
+                self.app_context(),
+                source,
+                title,
+                provider=provider,
+                language=language,
+                description=description,
+                overwrite=overwrite,
+                request_headers=request_headers,
+                progress=progress,
+            )
+
+        runner = self.jobs.run_sync if sync else self.jobs.submit
+        return runner("media.transcribe_source", worker)
 
     def media_save_transcript(
         self,

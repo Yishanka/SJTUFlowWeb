@@ -24,9 +24,11 @@ from sjtuflow.tools.media import (
     TranscriptSegment,
     canvas_media_access_hint,
     probe_media,
+    resolve_media_stream,
     save_transcript,
     transcribe_media,
     transcribe_media_and_save,
+    transcribe_resolved_media_source,
     transcribe_stream_to_transcript,
 )
 from sjtuflow.tools.registry import ToolContext, run_tool
@@ -123,6 +125,42 @@ def test_canvas_media_access_hint_flags_login_session():
     assert hint["is_external_tool"] is True
 
 
+def test_resolve_stream_from_video_html_snippet(tmp_path):
+    app = _app(tmp_path)
+    html = (
+        '<video id="kmd-video-player" src="https://live.sjtu.edu.cn/vod/course/clip.mp4?key=secret"></video>'
+    )
+
+    resolved = resolve_media_stream(app, html)
+
+    assert resolved["status"] == "resolved"
+    assert resolved["stream_url"] == "https://live.sjtu.edu.cn/vod/course/clip.mp4?key=secret"
+    assert resolved["display_url"] == "https://live.sjtu.edu.cn/vod/course/clip.mp4?***"
+    assert resolved["candidates"][0]["tag"] == "video"
+    assert resolved["candidates"][0]["attribute"] == "src"
+
+
+def test_resolve_stream_from_local_html_file(tmp_path):
+    app = _app(tmp_path)
+    snippet = _touch(
+        tmp_path / "snippet.html",
+        b'<video src="https://live.sjtu.edu.cn/vod/course/clip.mp4?key=file-secret"></video>',
+    )
+
+    resolved = resolve_media_stream(app, str(snippet))
+
+    assert resolved["status"] == "resolved"
+    assert resolved["stream_url"].endswith("clip.mp4?key=file-secret")
+
+
+def test_resolve_canvas_external_tool_requires_browser_session(tmp_path):
+    app = _app(tmp_path)
+    resolved = resolve_media_stream(app, "https://oc.sjtu.edu.cn/courses/123/external_tools/456")
+    assert resolved["status"] == "requires_browser_session"
+    assert resolved["requires_browser_login"] is True
+    assert resolved["candidates"] == []
+
+
 # --------------------------------------------------------------------------- #
 # transcribe
 # --------------------------------------------------------------------------- #
@@ -214,6 +252,39 @@ def test_stream_transcribe_requires_http_url(tmp_path):
         transcribe_stream_to_transcript(app, "file:///tmp/video.mp4", "Bad Stream")
 
 
+def test_transcribe_source_resolves_html_and_saves_transcript(tmp_path, monkeypatch):
+    app = _app(tmp_path)
+    snippet = _touch(
+        tmp_path / "data" / "snippet.html",
+        b'<video src="https://live.sjtu.edu.cn/vod/course/clip.mp4?key=secret"></video>',
+    )
+
+    def fake_run(cmd, *, timeout=1800):
+        output = Path(cmd[-1])
+        output.write_bytes(b"\x00\x00")
+
+        class _Completed:
+            stdout = ""
+
+        return _Completed()
+
+    def fake_whisper(audio_path, language, model_size):
+        return TranscriptResult(
+            segments=[TranscriptSegment(0.0, 4.0, "老师提到了签到")],
+            language=language or "zh",
+            provider="local-whisper",
+        )
+
+    monkeypatch.setattr(media_mod, "_run", fake_run)
+    monkeypatch.setattr(media_mod, "_transcribe_faster_whisper", fake_whisper)
+
+    meta = transcribe_resolved_media_source(app, str(snippet), "Resolved Lecture", language="zh")
+
+    assert Path(meta["path"]).exists()
+    assert meta["source"] == "https://live.sjtu.edu.cn/vod/course/clip.mp4?***"
+    assert meta["resolved_media"]["candidate_count"] == 1
+
+
 # --------------------------------------------------------------------------- #
 # save_transcript
 # --------------------------------------------------------------------------- #
@@ -298,11 +369,13 @@ def test_media_tools_registered():
     names = {tool.name for tool in registry.list()}
     assert {
         "media.canvas_access_hint",
+        "media.resolve_stream",
         "media.probe",
         "media.extract_audio",
         "media.transcribe",
         "media.transcribe_and_save",
         "media.transcribe_stream",
+        "media.transcribe_source",
         "media.save_transcript",
     } <= names
 
@@ -317,12 +390,30 @@ def test_media_transcribe_tool_via_registry(tmp_path, fake_pipeline):
     assert result.data["segments"]
 
 
+def test_media_resolve_stream_tool_redacts_signed_urls(tmp_path):
+    app = _app(tmp_path)
+    registry = build_registry()
+    spec = registry.get("media.resolve_stream")
+    result = run_tool(
+        spec,
+        ToolContext(app=app, interactive=False),
+        {"source": '<video src="https://live.sjtu.edu.cn/vod/course/clip.mp4?key=secret"></video>'},
+    )
+    assert result.ok is True
+    payload = json.dumps(result.data, ensure_ascii=False)
+    assert "key=secret" not in payload
+    assert result.data["stream_url_available"] is True
+    assert result.data["display_url"].endswith("?***")
+
+
 def test_media_risk_levels():
     registry = build_registry()
     assert registry.get("media.extract_audio").requires_confirmation is True
     assert registry.get("media.save_transcript").requires_confirmation is True
     assert registry.get("media.transcribe_and_save").requires_confirmation is True
     assert registry.get("media.transcribe_stream").requires_confirmation is True
+    assert registry.get("media.transcribe_source").requires_confirmation is True
+    assert registry.get("media.resolve_stream").risk_level == "read"
     assert registry.get("media.probe").risk_level == "read"
     assert registry.get("media.transcribe").risk_level == "read"
 
@@ -444,3 +535,20 @@ def test_service_canvas_access_hint(tmp_path, monkeypatch):
     )
     hint = service.media_canvas_access_hint("https://oc.sjtu.edu.cn/courses/123/external_tools/456")
     assert hint["status"] == "requires_browser_session"
+
+
+def test_service_resolve_stream_from_html(tmp_path, monkeypatch):
+    monkeypatch.setenv("SJTU_FLOW_CONFIG", str(tmp_path / "config.toml"))
+    service = LocalAppService(cwd=tmp_path)
+    service.update_config(
+        {
+            "workspace.state_dir": str(tmp_path / "state"),
+            "workspace.data_dir": str(tmp_path / "data"),
+        }
+    )
+    html = '<video src="https://live.sjtu.edu.cn/vod/course/clip.mp4?key=secret"></video>'
+    resolved = service.media_resolve_stream(html)
+    assert resolved["status"] == "resolved"
+    assert "stream_url" not in resolved
+    assert resolved["stream_url_available"] is True
+    assert resolved["display_url"].endswith("?***")
