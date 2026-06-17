@@ -23,3 +23,9 @@ SJTUFlowData/
 # Agents
 .agents
 .codex
+
+# Tmp
+tmp
+
+# Local Models
+models/

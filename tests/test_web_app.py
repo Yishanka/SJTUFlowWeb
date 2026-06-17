@@ -30,3 +30,40 @@ def test_default_frontend_dir_uses_source_when_dist_missing():
     path = default_frontend_dir()
     assert path.name in {"frontend", "dist"}
     assert (path / "index.html").exists()
+
+
+def test_canvas_request_transcription_api_starts_job(tmp_path, monkeypatch):
+    service = LocalAppService(cwd=tmp_path)
+
+    def fake_job(
+        request,
+        title=None,
+        provider="local-whisper",
+        language=None,
+        description="",
+            *,
+            overwrite=False,
+            wait_seconds=45,
+            login_wait_seconds=120,
+            max_candidates=20,
+            sync=False,
+        ):
+        return {
+            "id": "job-1",
+            "kind": "media.transcribe_canvas_request",
+            "status": "pending",
+            "request": request,
+            "title": title,
+        }
+
+    monkeypatch.setattr(service, "media_transcribe_canvas_request", fake_job)
+    client = TestClient(create_app(service=service, frontend_dir=tmp_path))
+
+    response = client.post(
+        "/api/media/transcribe-canvas-request",
+        json={"request": "今天算法课老师是否提到签到？", "title": "算法课 6月17日"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["kind"] == "media.transcribe_canvas_request"
+    assert response.json()["request"] == "今天算法课老师是否提到签到？"

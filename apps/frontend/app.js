@@ -30,8 +30,8 @@ const state = {
   transcripts: [],
   transcriptQuery: "",
   selectedTranscript: null,
-  canvasCandidates: [],
   jobs: [],
+  pendingChat: null,
 };
 
 const app = document.querySelector("#app");
@@ -71,6 +71,78 @@ function formatDate(value) {
 function truncate(value, length = 140) {
   const text = String(value ?? "").replace(/\s+/g, " ").trim();
   return text.length > length ? `${text.slice(0, length - 1)}...` : text;
+}
+
+function inlineMarkdown(value) {
+  let html = escapeHtml(value);
+  html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
+  html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  html = html.replace(/\*([^*]+)\*/g, "<em>$1</em>");
+  return html;
+}
+
+function markdownToHtml(value) {
+  const lines = String(value ?? "").replace(/\r\n/g, "\n").split("\n");
+  const html = [];
+  let inList = false;
+  let inCode = false;
+  let codeLines = [];
+
+  function closeList() {
+    if (inList) {
+      html.push("</ul>");
+      inList = false;
+    }
+  }
+
+  function flushCode() {
+    html.push(`<pre><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
+    codeLines = [];
+  }
+
+  for (const rawLine of lines) {
+    const line = rawLine.trimEnd();
+    if (line.startsWith("```")) {
+      if (inCode) {
+        flushCode();
+        inCode = false;
+      } else {
+        closeList();
+        inCode = true;
+        codeLines = [];
+      }
+      continue;
+    }
+    if (inCode) {
+      codeLines.push(line);
+      continue;
+    }
+    if (!line.trim()) {
+      closeList();
+      continue;
+    }
+    const heading = line.match(/^(#{1,3})\s+(.+)$/);
+    if (heading) {
+      closeList();
+      const level = heading[1].length + 2;
+      html.push(`<h${level}>${inlineMarkdown(heading[2])}</h${level}>`);
+      continue;
+    }
+    const bullet = line.match(/^[-*]\s+(.+)$/);
+    if (bullet) {
+      if (!inList) {
+        html.push("<ul>");
+        inList = true;
+      }
+      html.push(`<li>${inlineMarkdown(bullet[1])}</li>`);
+      continue;
+    }
+    closeList();
+    html.push(`<p>${inlineMarkdown(line)}</p>`);
+  }
+  if (inCode) flushCode();
+  closeList();
+  return html.join("");
 }
 
 function skillSourceLabel(source) {
@@ -526,7 +598,14 @@ function sessionList() {
 
 function messages() {
   const messages = state.activeSession?.messages || [];
-  const visible = messages.filter((message) => message.role !== "system");
+  const displayMessages = messages.filter((message) => {
+    if (["system", "tool"].includes(message.role)) return false;
+    return !(message.role === "assistant" && !String(message.content || "").trim() && message.tool_calls?.length);
+  });
+  const toolMessages = messages.filter((message) => message.role === "tool");
+  const visible = state.pendingChat
+    ? [...displayMessages, { role: "user", content: state.pendingChat.message, pending: true }, { role: "progress", content: state.pendingChat.steps }]
+    : displayMessages;
   if (!visible.length) {
     return `<div class="empty">
       <div>
@@ -537,14 +616,46 @@ function messages() {
       </div>
     </div>`;
   }
-  return visible
-    .map((message) => {
-      const role = message.role || "assistant";
-      const content = typeof message.content === "string" ? message.content : JSON.stringify(message.content, null, 2);
-      const label = role === "user" ? "你" : role === "assistant" ? "SJTUFlow" : "工具状态";
-      return `<div class="message ${escapeHtml(role)}"><div class="message-role">${escapeHtml(label)}</div>${escapeHtml(content)}</div>`;
-    })
-    .join("");
+  return `
+    ${visible.map(renderMessage).join("")}
+    ${toolMessages.length ? hiddenContext(toolMessages) : ""}
+  `;
+}
+
+function renderMessage(message) {
+  const role = message.role || "assistant";
+  if (role === "progress") {
+    const steps = Array.isArray(message.content) ? message.content : [];
+    return `
+      <div class="message progress">
+        <div class="message-role">正在思考</div>
+        <div class="thinking-line"><span class="spinner"></span>${escapeHtml(steps[0] || "正在整理问题和可用上下文。")}</div>
+        <ul class="thinking-steps">
+          ${steps.slice(1).map((step) => `<li>${escapeHtml(step)}</li>`).join("")}
+        </ul>
+      </div>
+    `;
+  }
+  const content = typeof message.content === "string" ? message.content : JSON.stringify(message.content, null, 2);
+  const label = role === "user" ? "你" : role === "assistant" ? "SJTUFlow" : "工具状态";
+  const body = role === "assistant" ? `<div class="markdown-body">${markdownToHtml(content)}</div>` : escapeHtml(content);
+  return `<div class="message ${escapeHtml(role)} ${message.pending ? "pending" : ""}"><div class="message-role">${escapeHtml(label)}</div>${body}</div>`;
+}
+
+function hiddenContext(toolMessages) {
+  return `
+    <details class="hidden-context">
+      <summary>上下文与工具记录 (${toolMessages.length})</summary>
+      <div class="tool-log">
+        ${toolMessages
+          .map((message) => {
+            const content = typeof message.content === "string" ? message.content : JSON.stringify(message.content, null, 2);
+            return `<div class="tool-log-item">${escapeHtml(content)}</div>`;
+          })
+          .join("")}
+      </div>
+    </details>
+  `;
 }
 
 function promptSuggestions() {
@@ -565,8 +676,8 @@ function promptSuggestions() {
 function composer() {
   return `
     <form class="composer" data-form="chat">
-      <textarea name="message" placeholder="输入你想询问的学习问题。没有会话时会自动新建。" ${isLoading("message") ? "disabled" : ""}></textarea>
-      <button class="button primary" title="发送" aria-label="发送" ${!isLoading("message") ? "" : "disabled"}>${isLoading("message") ? "…" : "↑"}</button>
+      <textarea name="message" placeholder="输入你想询问的学习问题。Enter 换行，Ctrl+Enter 发送。" ${isLoading("message") ? "disabled" : ""}></textarea>
+      <button class="button primary" title="发送 Ctrl+Enter" aria-label="发送" ${!isLoading("message") ? "" : "disabled"}>${isLoading("message") ? "…" : "↑"}</button>
     </form>
   `;
 }
@@ -799,43 +910,29 @@ function mediaView() {
       </section>
       <section class="panel">
         <div class="panel-head">
-          <h2>Canvas 课程视频</h2>
-          <span class="badge warn">托管浏览器</span>
+          <h2>Canvas 课程录播</h2>
+          <span class="badge warn">智能定位</span>
         </div>
         <div class="panel-body">
+          <div class="toolbar-form">
+            <button class="button" type="button" data-action="ensure-canvas-login" ${isLoading("canvas-login") ? "disabled" : ""}>准备 Canvas 登录态</button>
+          </div>
           <form class="grid" data-form="media-canvas">
             <div class="field">
-              <label for="canvas-url">Canvas 页面 URL</label>
-              <input id="canvas-url" name="url" placeholder="https://oc.sjtu.edu.cn/courses/.../external_tools/..." />
+              <label for="canvas-request">课程、日期、主题或 Canvas URL</label>
+              <textarea id="canvas-request" name="request" placeholder="例如：今天算法设计课程老师是否提到签到？也可以直接粘贴 Canvas external_tools URL 作为调试路径"></textarea>
             </div>
             <div class="field">
               <label for="canvas-title">转写标题</label>
-              <input id="canvas-title" name="title" placeholder="课程名 + 日期" />
+              <input id="canvas-title" name="title" placeholder="可选，例如 算法设计 6月17日" />
             </div>
             <div class="field">
               <label for="canvas-description">说明</label>
               <textarea id="canvas-description" name="description" placeholder="课程、讲次、主题或签到问题备注"></textarea>
             </div>
-            <button class="button primary" ${isLoading("canvas-media") ? "disabled" : ""}>打开登录态并转写</button>
+            <button class="button primary" ${isLoading("canvas-media") ? "disabled" : ""}>智能定位并转写</button>
           </form>
-          <div class="helper-note">首次使用时，SJTUFlow 会打开自己管理的浏览器窗口；请在那个窗口登录 Canvas。不会读取你日常浏览器的 cookie，也不会保存视频本体。</div>
-        </div>
-      </section>
-      <section class="panel span-2">
-        <div class="panel-head">
-          <div>
-            <h2>查找 Canvas 视频页面</h2>
-            <div class="list-meta">只有课程名时，可先用 course id 搜索课程主页/模块页里的 external_tools 候选。</div>
-          </div>
-          ${isLoading("canvas-pages") ? '<span class="badge">查找中</span>' : ""}
-        </div>
-        <div class="panel-body">
-          <form class="toolbar-form" data-form="canvas-pages">
-            <input name="course_id" placeholder="Canvas course id，例如 12345" />
-            <input name="query" placeholder="关键词，例如 6月17日 签到" />
-            <button class="button primary">查找页面</button>
-          </form>
-          ${canvasCandidateList()}
+          <div class="helper-note">先用“准备 Canvas 登录态”在 SJTUFlow 托管浏览器里登录一次；登录成功后会保存本地 state。后续自然语言转写会用 Canvas token 匹配课程，再通过 SJTU 课程视频 LTI/VOD 接口列回放并选择视频流。不会读取你日常浏览器的 cookie，也不会保存视频本体。</div>
         </div>
       </section>
       <section class="panel span-2">
@@ -845,30 +942,6 @@ function mediaView() {
         </div>
         <div class="panel-body">${jobList()}</div>
       </section>
-    </div>
-  `;
-}
-
-function canvasCandidateList() {
-  if (!state.canvasCandidates.length) {
-    return `<div class="empty">还没有候选页面。也可以直接在上方粘贴 Canvas 课程视频页面 URL。</div>`;
-  }
-  return `
-    <div class="list">
-      ${state.canvasCandidates
-        .map(
-          (item) => `
-            <button class="list-item" data-action="use-canvas-candidate" data-url="${escapeHtml(item.url || "")}" data-title="${escapeHtml(item.title || item.text || "Canvas 课程视频")}">
-              <div class="list-title">${escapeHtml(item.title || item.text || item.display_url || item.url)}</div>
-              <div class="list-meta">${escapeHtml(item.display_url || item.url || "")}</div>
-              <div class="badge-row">
-                ${item.source_page ? `<span class="badge">${escapeHtml(item.source_page)}</span>` : ""}
-                ${Number.isFinite(item.score) ? `<span class="badge good">匹配 ${escapeHtml(item.score)}</span>` : ""}
-              </div>
-            </button>
-          `,
-        )
-        .join("")}
     </div>
   `;
 }
@@ -901,6 +974,7 @@ function settingsView() {
   const canvas = values.canvas || {};
   const workspace = values.workspace || {};
   const agent = values.agent || {};
+  const asr = values.asr || {};
   const permissions = values.permissions || {};
   return `
     <div class="grid two">
@@ -921,6 +995,13 @@ function settingsView() {
             ${field("workspace.data_dir", "资料目录", workspace.data_dir)}
             ${field("agent.briefing_window_days", "Briefing 天数", agent.briefing_window_days, "", "number")}
             ${field("agent.max_tool_calls", "最大工具调用", agent.max_tool_calls, "", "number")}
+            <div class="form-section span-2">本地转写模型</div>
+            ${field("asr.model", "Whisper 模型", asr.model || "base", "base / small / Systran/faster-whisper-base")}
+            ${field("asr.model_path", "本地模型目录", asr.model_path, "留空表示使用 Hugging Face cache/download")}
+            ${field("asr.download_root", "模型缓存目录", asr.download_root, "可选，例如 ~/.cache/huggingface/hub")}
+            ${checkbox("asr.local_files_only", "只使用本地模型/缓存", asr.local_files_only)}
+            ${field("asr.device", "推理设备", asr.device || "cpu", "cpu or cuda")}
+            ${field("asr.compute_type", "计算精度", asr.compute_type || "int8", "int8 / float16 / float32")}
             ${checkbox("permissions.confirm_local_write", "本地写入前确认", permissions.confirm_local_write)}
             ${checkbox("permissions.confirm_destructive", "删除类操作前确认", permissions.confirm_destructive)}
           </form>
@@ -961,12 +1042,16 @@ function checkbox(name, label, checked) {
 function doctorSummary() {
   const doctor = state.doctor;
   if (!doctor) return `<div class="empty">还没有读取到运行检查结果。</div>`;
+  const asrModelPath = doctor.asr?.model_path || "Hugging Face cache/download";
   const rows = [
     ["配置文件", displayPath(doctor.config)],
     ["状态目录", displayPath(doctor.state_dir)],
     ["资料目录", displayPath(doctor.data_dir)],
     ["模型提供方", doctor.model?.provider],
     ["模型 key", doctor.model?.key_configured ? "已配置" : "未配置"],
+    ["ASR 模型", doctor.asr?.model],
+    ["ASR 模型目录", displayPath(asrModelPath)],
+    ["ASR 离线模式", doctor.asr?.local_files_only ? "开启" : "关闭"],
     ["Canvas token", doctor.canvas?.token_configured ? "已配置" : "未配置"],
     ["已加载 Skills", doctor.skills_loaded],
     ["后端工具数", doctor.tools_registered],
@@ -1032,8 +1117,17 @@ async function deleteSession() {
 }
 
 async function sendMessage(form) {
-  const message = new FormData(form).get("message")?.toString().trim();
+  const textarea = form.querySelector("textarea[name='message']");
+  const message = textarea?.value.trim() || "";
   if (!message) return;
+  state.pendingChat = {
+    message,
+    steps: [
+      "我会先判断这个问题需要哪些本地资料。",
+      "再按需读取 Skills、Transcripts 或 Canvas 元数据。",
+      "如果调用工具，细节会收进下方的“上下文与工具记录”。",
+    ],
+  };
   setLoading("message", true);
   try {
     if (!state.activeSession) {
@@ -1051,6 +1145,7 @@ async function sendMessage(form) {
   } catch (error) {
     notify(error.message || String(error), "error");
   } finally {
+    state.pendingChat = null;
     setLoading("message", false);
   }
 }
@@ -1181,9 +1276,9 @@ async function saveSettings() {
   if (!form) return;
   const data = new FormData(form);
   const updates = {};
+  const keepWhenBlank = new Set(["model.api_key", "canvas.access_token"]);
   for (const [key, value] of data.entries()) {
-    if ((key === "model.api_key" || key === "canvas.access_token") && !value) continue;
-    if (value === "") continue;
+    if (keepWhenBlank.has(key) && !value) continue;
     if (value === "true" || value === "false") updates[key] = value === "true";
     else if (["agent.briefing_window_days", "agent.max_tool_calls"].includes(key)) updates[key] = Number(value);
     else updates[key] = value;
@@ -1221,48 +1316,37 @@ async function startLocalMedia(form) {
 
 async function startCanvasMedia(form) {
   const data = Object.fromEntries(new FormData(form).entries());
-  if (!data.url || !data.title) {
-    notify("Canvas 页面 URL 和标题都需要填写。", "error");
+  if (!data.request) {
+    notify("请填写课程描述、日期主题，或 Canvas 调试 URL。", "error");
     return;
   }
   await loadResource("canvas-media", async () => {
-    await api("/api/media/transcribe-canvas-page", {
+    await api("/api/media/transcribe-canvas-request", {
       method: "POST",
       body: JSON.stringify({
-        url: data.url,
-        title: data.title,
+        request: data.request,
+        title: data.title || null,
         description: data.description || "",
         language: "zh",
+        wait_seconds: 45,
         sync: false,
       }),
     });
     await loadJobs(false);
-    notify("Canvas 转写任务已开始；如需登录，请在 SJTUFlow 打开的浏览器窗口完成登录后重试。");
+    notify("Canvas 智能转写任务已开始；如提示需要登录，请先点“准备 Canvas 登录态”。");
   });
 }
 
-async function findCanvasPages(form) {
-  const data = Object.fromEntries(new FormData(form).entries());
-  if (!data.course_id) {
-    notify("Canvas course id is required.", "error");
-    return;
-  }
-  await loadResource("canvas-pages", async () => {
-    const result = await api("/api/media/find-canvas-pages", {
+async function ensureCanvasLogin() {
+  await loadResource("canvas-login", async () => {
+    const result = await api("/api/media/ensure-canvas-login", {
       method: "POST",
-      body: JSON.stringify({
-        course_id: data.course_id,
-        query: data.query || "",
-        max_candidates: 12,
-      }),
+      body: JSON.stringify({ wait_seconds: 120 }),
     });
-    state.canvasCandidates = result.candidates || [];
-    if (result.requires_browser_login) {
-      notify("请在 SJTUFlow 打开的浏览器窗口登录 Canvas，然后重新查找。", "error");
-    } else if (!state.canvasCandidates.length) {
-      notify(result.message || "没有找到 Canvas 视频候选页面。", "error");
+    if (result.logged_in) {
+      notify("Canvas 登录态已准备好。");
     } else {
-      notify(`找到 ${state.canvasCandidates.length} 个候选页面。`);
+      notify(result.message || "请在 SJTUFlow 浏览器窗口完成 Canvas 登录后重试。", "error");
     }
   });
 }
@@ -1300,13 +1384,7 @@ document.addEventListener("click", (event) => {
   if (action === "refresh-transcripts") loadTranscripts();
   if (action === "refresh-jobs") loadJobs();
   if (action === "save-settings") saveSettings();
-  if (action === "use-canvas-candidate") {
-    const urlInput = document.querySelector("#canvas-url");
-    const titleInput = document.querySelector("#canvas-title");
-    if (urlInput) urlInput.value = actionTarget.dataset.url || "";
-    if (titleInput && !titleInput.value) titleInput.value = actionTarget.dataset.title || "";
-    notify("已填入候选 Canvas 页面。");
-  }
+  if (action === "ensure-canvas-login") ensureCanvasLogin();
   if (action === "use-prompt") {
     const input = document.querySelector(".composer textarea");
     if (input) {
@@ -1325,7 +1403,18 @@ document.addEventListener("submit", (event) => {
   if (formName === "transcript-search") searchTranscripts(form);
   if (formName === "media-local") startLocalMedia(form);
   if (formName === "media-canvas") startCanvasMedia(form);
-  if (formName === "canvas-pages") findCanvasPages(form);
+});
+
+document.addEventListener("keydown", (event) => {
+  const textarea = event.target.closest?.(".composer textarea");
+  if (!textarea) return;
+  if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+    event.preventDefault();
+    const form = textarea.closest("form");
+    if (form && !isLoading("message")) {
+      form.requestSubmit();
+    }
+  }
 });
 
 render();

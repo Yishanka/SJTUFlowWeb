@@ -4,14 +4,15 @@ import json
 import re
 import subprocess
 import time
+from http.cookiejar import Cookie, CookieJar
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from html import unescape
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import quote, urljoin, urlparse, urlunparse
-from urllib.request import Request, urlopen
+from urllib.parse import quote, urlencode, urljoin, urlparse, urlunparse
+from urllib.request import HTTPCookieProcessor, Request, build_opener, urlopen
 from urllib.error import HTTPError, URLError
 
 from sjtuflow.runtime import AppContext
@@ -28,11 +29,17 @@ AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".
 MEDIA_EXTENSIONS = VIDEO_EXTENSIONS | AUDIO_EXTENSIONS
 STREAM_EXTENSIONS = MEDIA_EXTENSIONS | {".m3u8", ".mpd"}
 SJTU_CANVAS_HOST = "oc.sjtu.edu.cn"
+SJTU_COURSES_HOST = "courses.sjtu.edu.cn"
+SJTU_CANVAS_VIDEO_TOOL_ID = "9487"
 MEDIA_URL_PATTERN = re.compile(
     r"https?://[^\s\"'<>\\]+?(?:\.m3u8|\.mpd|\.mp4|\.m4v|\.mov|\.webm|\.mp3|\.m4a|\.aac|\.wav)(?:\?[^\s\"'<>\\]*)?",
     re.IGNORECASE,
 )
 DEFAULT_BROWSER_WAIT_SECONDS = 45
+DEFAULT_LOGIN_WAIT_SECONDS = 120
+DEFAULT_COURSE_PAGE_WAIT_SECONDS = 20
+HTTP_URL_PATTERN = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
+MAX_MODEL_SELECTION_ITEMS = 40
 
 CANVAS_MEDIA_LOGIN_MESSAGE = (
     "SJTU Canvas external_tools media pages usually cannot be fetched with a Canvas API token alone. "
@@ -137,6 +144,69 @@ class TranscriptResult:
             "text": self.text,
             "segments": [segment.to_dict() for segment in self.segments],
         }
+
+
+@dataclass(frozen=True)
+class FasterWhisperOptions:
+    model: str = "base"
+    model_path: str = ""
+    download_root: str = ""
+    local_files_only: bool = False
+    device: str = "cpu"
+    compute_type: str = "int8"
+
+    @property
+    def model_size_or_path(self) -> str:
+        return self.model_path or self.model or "base"
+
+
+@dataclass
+class CanvasLectureStream:
+    quality: str
+    url: str
+    request_headers: dict[str, str] = field(default_factory=dict)
+
+    def to_candidate(self) -> dict[str, Any]:
+        parsed = urlparse(self.url)
+        return {
+            "stream_url": self.url,
+            "display_url": _redact_url(self.url),
+            "host": parsed.hostname or parsed.netloc,
+            "extension": Path(parsed.path).suffix.lower() or ".m3u8",
+            "source": "sjtu_lti_video_api",
+            "quality": self.quality,
+            "request_headers": self.request_headers or None,
+        }
+
+
+@dataclass
+class CanvasLectureVideo:
+    id: str
+    name: str
+    category: str
+    teacher: str = ""
+    classroom: str = ""
+    begin_time: str = ""
+    end_time: str = ""
+    status: str = ""
+    streams: list[CanvasLectureStream] = field(default_factory=list)
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    def safe_summary(self, index: int | None = None) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "id": self.id,
+            "name": self.name,
+            "category": self.category,
+            "teacher": self.teacher,
+            "classroom": self.classroom,
+            "begin_time": self.begin_time,
+            "end_time": self.end_time,
+            "status": self.status,
+            "stream_count": len(self.streams),
+        }
+        if index is not None:
+            payload["index"] = index
+        return payload
 
 
 # --------------------------------------------------------------------------- #
@@ -253,11 +323,35 @@ def safe_resolution_payload(payload: dict[str, Any]) -> dict[str, Any]:
     safe_candidates: list[dict[str, Any]] = []
     for candidate in safe.get("candidates") or []:
         item = dict(candidate)
+        item.pop("request_headers", None)
         candidate_url = str(item.pop("stream_url", "") or "")
         item["stream_url_available"] = bool(candidate_url)
         item["display_url"] = _redact_url(candidate_url) if candidate_url else str(item.get("display_url") or "")
         safe_candidates.append(item)
     safe["candidates"] = safe_candidates
+    return safe
+
+
+def _safe_canvas_request_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    safe = dict(plan)
+    safe_pages: list[dict[str, Any]] = []
+    for page in safe.get("selected_pages") or []:
+        item = dict(page)
+        resolved = item.get("resolved_media")
+        if isinstance(resolved, dict):
+            item["resolved_media"] = safe_resolution_payload(resolved)
+        safe_pages.append(item)
+    safe["selected_pages"] = safe_pages
+
+    safe_streams: list[dict[str, Any]] = []
+    for stream in safe.get("selected_streams") or []:
+        item = dict(stream)
+        item.pop("request_headers", None)
+        stream_url = str(item.pop("stream_url", "") or "")
+        item["stream_url_available"] = bool(stream_url)
+        item["display_url"] = _redact_url(stream_url) if stream_url else str(item.get("display_url") or "")
+        safe_streams.append(item)
+    safe["selected_streams"] = safe_streams
     return safe
 
 
@@ -275,6 +369,376 @@ def _source_kind(value: str) -> str:
     if "<" in value and ">" in value:
         return "html"
     return "path_or_html"
+
+
+def _extract_urls(text: str) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
+    for match in HTTP_URL_PATTERN.finditer(text):
+        value = match.group(0).rstrip(").,，。;；]")
+        if value and value not in seen:
+            seen.add(value)
+            urls.append(value)
+    return urls
+
+
+def _text_terms(value: str) -> list[str]:
+    terms: list[str] = []
+    for raw in re.split(r"[\s,，。:：;；/\\|()\[\]{}<>\"'`~!@#$%^&*_+=?-]+", value.lower()):
+        term = raw.strip()
+        if not term:
+            continue
+        if term in {"the", "and", "or", "a", "an", "of", "to", "in", "on", "for", "with", "课程", "老师", "视频"}:
+            continue
+        terms.append(term)
+    return terms
+
+
+def _cjk_bigrams(value: str) -> set[str]:
+    chars = [char for char in value if "\u4e00" <= char <= "\u9fff"]
+    return {chars[index] + chars[index + 1] for index in range(len(chars) - 1)}
+
+
+def _score_text_match(text: str, query: str) -> int:
+    haystack = text.lower()
+    score = 0
+    for term in _text_terms(query):
+        if term in haystack:
+            score += 3
+        elif len(term) >= 3 and any(bigram in haystack for bigram in _cjk_bigrams(term)):
+            score += sum(1 for bigram in _cjk_bigrams(term) if bigram in haystack)
+    return score
+
+
+def _json_object_from_text(value: str) -> dict[str, Any]:
+    text = value.strip()
+    if not text:
+        return {}
+    try:
+        payload = json.loads(text)
+        return payload if isinstance(payload, dict) else {}
+    except json.JSONDecodeError:
+        pass
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        try:
+            payload = json.loads(text[start : end + 1])
+            return payload if isinstance(payload, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def _model_choice(
+    app: AppContext,
+    *,
+    task: str,
+    choices: list[dict[str, Any]],
+    system_prompt: str,
+    user_prompt: str,
+    allow_multiple: bool = False,
+) -> dict[str, Any]:
+    """Ask the configured LLM to choose from indexed, already-sanitized choices.
+
+    The model only receives metadata and array indexes. Sensitive stream URLs,
+    cookies and request headers stay inside the backend process.
+    """
+
+    if not choices or app.config.model.provider in {"mock", "dry-run"}:
+        return {"strategy": "heuristic", "indexes": [], "reason": "No real model configured."}
+    try:
+        from sjtuflow.llm.mock_provider import build_provider
+
+        provider = build_provider(app.config.model.provider, app.config.model)
+        response = provider.complete(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            [],
+        )
+    except Exception as exc:  # fall back instead of failing the media job
+        return {"strategy": "heuristic", "indexes": [], "reason": f"Model selection unavailable: {exc}"}
+
+    payload = _json_object_from_text(response.content or "")
+    raw_indexes = payload.get("indexes")
+    if raw_indexes is None and "index" in payload:
+        raw_indexes = [payload.get("index")]
+    if not isinstance(raw_indexes, list):
+        raw_indexes = []
+    indexes: list[int] = []
+    for item in raw_indexes:
+        try:
+            index = int(item)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= index < len(choices) and index not in indexes:
+            indexes.append(index)
+    if indexes and not allow_multiple:
+        indexes = indexes[:1]
+    return {
+        "strategy": "llm",
+        "task": task,
+        "indexes": indexes,
+        "reason": str(payload.get("reason") or response.content or "").strip()[:1000],
+    }
+
+
+def _summarize_courses_for_model(courses: list[Any]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for index, course in enumerate(courses[:MAX_MODEL_SELECTION_ITEMS]):
+        items.append(
+            {
+                "index": index,
+                "id": str(getattr(course, "id", "")),
+                "name": str(getattr(course, "name", "")),
+                "code": str(getattr(course, "code", "")),
+                "term": str(getattr(course, "term", "")),
+                "workflow_state": str(getattr(course, "workflow_state", "")),
+            }
+        )
+    return items
+
+
+def _select_course(app: AppContext, request: str, courses: list[Any]) -> dict[str, Any]:
+    if not courses:
+        return {"course": None, "selection": {"strategy": "none", "reason": "No Canvas courses returned."}}
+
+    summaries = _summarize_courses_for_model(courses)
+    model_choice = _model_choice(
+        app,
+        task="select_canvas_course",
+        choices=summaries,
+        system_prompt=(
+            "You select the most likely Canvas course for a student media-transcription request. "
+            "Return strict JSON only: {\"indexes\":[number],\"reason\":\"short reason\"}. "
+            "Use course name, code, term, and the user's natural language."
+        ),
+        user_prompt=json.dumps({"request": request, "courses": summaries}, ensure_ascii=False),
+    )
+    if model_choice["indexes"]:
+        index = model_choice["indexes"][0]
+        return {"course": courses[index], "selection": model_choice}
+
+    scored: list[tuple[int, int, Any]] = []
+    for index, course in enumerate(courses):
+        text = " ".join(
+            [
+                str(getattr(course, "name", "")),
+                str(getattr(course, "code", "")),
+                str(getattr(course, "term", "")),
+                str(getattr(course, "id", "")),
+            ]
+        )
+        scored.append((_score_text_match(text, request), -index, course))
+    scored.sort(reverse=True)
+    best_score, _, best_course = scored[0]
+    return {
+        "course": best_course,
+        "selection": {
+            "strategy": "heuristic",
+            "indexes": [courses.index(best_course)],
+            "reason": "Selected by keyword overlap." if best_score else "No strong course keyword match; using first active course.",
+            "score": best_score,
+        },
+    }
+
+
+def _select_canvas_pages(app: AppContext, request: str, candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    if not candidates:
+        return {"pages": [], "selection": {"strategy": "none", "reason": "No Canvas media page candidates."}}
+
+    summaries = []
+    for index, item in enumerate(candidates[:MAX_MODEL_SELECTION_ITEMS]):
+        summaries.append(
+            {
+                "index": index,
+                "title": item.get("title") or "",
+                "text": item.get("text") or "",
+                "display_url": item.get("display_url") or item.get("url") or "",
+                "source_page": item.get("source_page") or "",
+                "score": item.get("score") or 0,
+            }
+        )
+    model_choice = _model_choice(
+        app,
+        task="select_canvas_media_pages",
+        choices=summaries,
+        system_prompt=(
+            "You select Canvas external_tools page(s) that most likely contain the requested lecture videos. "
+            "Return strict JSON only: {\"indexes\":[number],\"reason\":\"short reason\"}. "
+            "Pick all pages clearly needed by the request, but avoid unrelated tools like homework systems."
+        ),
+        user_prompt=json.dumps({"request": request, "pages": summaries}, ensure_ascii=False),
+        allow_multiple=True,
+    )
+    indexes = model_choice["indexes"]
+    if not indexes:
+        sorted_indexes = sorted(
+            range(len(candidates)),
+            key=lambda idx: (
+                int(candidates[idx].get("score") or 0),
+                _score_text_match(
+                    " ".join(str(candidates[idx].get(key) or "") for key in ("title", "text", "url")),
+                    request,
+                ),
+                -idx,
+            ),
+            reverse=True,
+        )
+        indexes = sorted_indexes[:1]
+        model_choice = {
+            "strategy": "heuristic",
+            "indexes": indexes,
+            "reason": "Selected by Canvas link score and keyword overlap.",
+        }
+    pages = [candidates[index] for index in indexes if 0 <= index < len(candidates)]
+    return {"pages": pages, "selection": model_choice}
+
+
+def _canvas_external_tool_candidates_from_api(app: AppContext, course_id: str, request: str) -> dict[str, Any]:
+    """Collect ExternalTool module items through the Canvas API token."""
+
+    items = app.canvas.list_external_tool_module_items(course_id, limit_modules=80, limit_items_per_module=100)
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in items:
+        url = str(getattr(item, "html_url", "") or getattr(item, "external_url", "") or "")
+        if not url:
+            continue
+        parsed = urlparse(url)
+        if parsed.scheme and parsed.netloc:
+            normalized = urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+        else:
+            normalized = urljoin(app.config.canvas.base_url.rstrip("/") + "/", url.lstrip("/"))
+            parsed = urlparse(normalized)
+            normalized = urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+        if "/external_tools/" not in urlparse(normalized).path or normalized in seen:
+            continue
+        seen.add(normalized)
+        text_for_score = " ".join(
+            [
+                str(getattr(item, "title", "")),
+                str(getattr(item, "type", "")),
+                normalized,
+            ]
+        )
+        candidates.append(
+            {
+                "url": normalized,
+                "display_url": _redact_url(normalized),
+                "text": str(getattr(item, "title", "")),
+                "title": str(getattr(item, "title", "")),
+                "score": _score_text_match(text_for_score, request),
+                "source_page": "canvas_api_modules",
+                "module_id": str(getattr(item, "module_id", "")),
+                "item_id": str(getattr(item, "id", "")),
+                "item_type": str(getattr(item, "type", "")),
+            }
+        )
+    candidates.sort(key=lambda item: (-int(item.get("score") or 0), str(item.get("title") or item.get("text") or "")))
+    return {
+        "status": "found" if candidates else "no_candidates",
+        "course_id": str(course_id),
+        "query": request,
+        "visited_pages": [{"page": "canvas_api_modules", "candidate_count": len(candidates)}],
+        "candidates": candidates,
+        "requires_browser_login": False,
+        "browser_session": "not_used",
+        "message": "" if candidates else "No Canvas ExternalTool module items were found through the Canvas API.",
+    }
+
+
+def _stream_preference(candidate: dict[str, Any], request: str) -> int:
+    extension = str(candidate.get("extension") or "").lower()
+    source = str(candidate.get("source") or "").lower()
+    text = " ".join(str(candidate.get(key) or "") for key in ("display_url", "host", "source", "tag", "attribute"))
+    score = _score_text_match(text, request)
+    if extension == ".m3u8":
+        score += 5
+    elif extension in {".mp4", ".m4v", ".mov", ".webm"}:
+        score += 4
+    elif extension in AUDIO_EXTENSIONS:
+        score += 3
+    elif extension == ".mpd":
+        score += 2
+    if "network" in source:
+        score += 2
+    if "html" in source:
+        score += 1
+    return score
+
+
+def _select_page_streams(app: AppContext, request: str, resolved: dict[str, Any]) -> dict[str, Any]:
+    candidates = list(resolved.get("candidates") or [])
+    if not candidates:
+        return {"streams": [], "selection": {"strategy": "none", "reason": "No media streams resolved."}}
+
+    summaries: list[dict[str, Any]] = []
+    for index, item in enumerate(candidates[:MAX_MODEL_SELECTION_ITEMS]):
+        summaries.append(
+            {
+                "index": index,
+                "display_url": item.get("display_url") or _redact_url(str(item.get("stream_url") or "")),
+                "host": item.get("host") or "",
+                "extension": item.get("extension") or "",
+                "source": item.get("source") or "",
+                "tag": item.get("tag") or "",
+                "attribute": item.get("attribute") or "",
+            }
+        )
+    model_choice = _model_choice(
+        app,
+        task="select_canvas_media_streams",
+        choices=summaries,
+        system_prompt=(
+            "You select which media stream(s) should be transcribed from a Canvas video page. "
+            "Return strict JSON only: {\"indexes\":[number],\"reason\":\"short reason\"}. "
+            "Prefer actual lecture video/audio streams, especially m3u8/mp4 captured from browser network. "
+            "Pick multiple only if the request explicitly needs multiple lecture videos."
+        ),
+        user_prompt=json.dumps(
+            {
+                "request": request,
+                "page": {
+                    "source": resolved.get("source"),
+                    "final_url": resolved.get("final_url"),
+                    "display_url": resolved.get("display_url"),
+                },
+                "streams": summaries,
+            },
+            ensure_ascii=False,
+        ),
+        allow_multiple=True,
+    )
+    indexes = model_choice["indexes"]
+    if not indexes:
+        indexes = [
+            max(
+                range(len(candidates)),
+                key=lambda idx: (_stream_preference(candidates[idx], request), -idx),
+            )
+        ]
+        model_choice = {
+            "strategy": "heuristic",
+            "indexes": indexes,
+            "reason": "Selected by stream type/source preference.",
+        }
+
+    streams: list[dict[str, Any]] = []
+    for index in indexes:
+        if not 0 <= index < len(candidates):
+            continue
+        stream = dict(candidates[index])
+        stream["selection_index"] = index
+        stream["request_headers"] = (
+            resolved.get("request_headers") if isinstance(resolved.get("request_headers"), dict) else None
+        )
+        stream["page_url"] = resolved.get("source") or ""
+        stream["final_url"] = resolved.get("final_url") or ""
+        streams.append(stream)
+    return {"streams": streams, "selection": model_choice}
 
 
 def _fetch_authorized_html(url: str, request_headers: dict[str, str] | None = None) -> str:
@@ -304,21 +768,120 @@ def _browser_profile_dir(app: AppContext) -> Path:
     return app.workspace.assert_safe_write_path(app.workspace.state_dir / "browser" / "canvas")
 
 
+def _browser_storage_state_path(app: AppContext) -> Path:
+    return app.workspace.assert_safe_write_path(app.workspace.state_dir / "browser" / "canvas-storage-state.json")
+
+
+def _cookie_from_storage_item(item: dict[str, Any]) -> Cookie:
+    domain = str(item.get("domain") or "")
+    path = str(item.get("path") or "/")
+    expires = item.get("expires")
+    expires_value: int | None
+    try:
+        expires_float = float(expires)
+        expires_value = int(expires_float) if expires_float > 0 else None
+    except (TypeError, ValueError):
+        expires_value = None
+    return Cookie(
+        version=0,
+        name=str(item.get("name") or ""),
+        value=str(item.get("value") or ""),
+        port=None,
+        port_specified=False,
+        domain=domain,
+        domain_specified=bool(domain),
+        domain_initial_dot=domain.startswith("."),
+        path=path,
+        path_specified=bool(path),
+        secure=bool(item.get("secure")),
+        expires=expires_value,
+        discard=expires_value is None,
+        comment=None,
+        comment_url=None,
+        rest={"HttpOnly": bool(item.get("httpOnly"))},
+        rfc2109=False,
+    )
+
+
+def _storage_state_cookiejar(app: AppContext) -> CookieJar:
+    path = _browser_storage_state_path(app)
+    if not path.exists():
+        raise MediaError("Canvas login state is missing. Click Prepare Canvas Login and finish login once.")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise MediaError("Canvas login state is unreadable. Prepare Canvas login again.") from exc
+
+    jar = CookieJar()
+    for item in payload.get("cookies") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "")
+        domain = str(item.get("domain") or "")
+        if not name or not domain:
+            continue
+        jar.set_cookie(_cookie_from_storage_item(item))
+    if not any(
+        _cookie_domain_matches(cookie.domain, SJTU_CANVAS_HOST)
+        or _cookie_domain_matches(cookie.domain, "sjtu.edu.cn")
+        for cookie in jar
+    ):
+        raise MediaError("Canvas login state has no Canvas cookies. Prepare Canvas login again.")
+    return jar
+
+
+def _sjtu_video_opener(app: AppContext):
+    jar = _storage_state_cookiejar(app)
+    opener = build_opener(HTTPCookieProcessor(jar))
+    opener.addheaders = [
+        (
+            "User-Agent",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+        ),
+        ("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8"),
+    ]
+    return opener, jar
+
+
 def _looks_like_canvas_login_page(url: str, html: str) -> bool:
     parsed = urlparse(url)
     host = (parsed.hostname or parsed.netloc).lower()
-    haystack = f"{url}\n{html[:5000]}".lower()
     login_hosts = ("jaccount.sjtu.edu.cn", "login.sjtu.edu.cn", "id.sjtu.edu.cn")
-    login_terms = ("login", "jaccount", "统一身份认证", "登录", "password", "captcha")
-    return any(host == item or host.endswith(f".{item}") for item in login_hosts) or any(
-        term in haystack for term in login_terms
-    )
+    if any(host == item or host.endswith(f".{item}") for item in login_hosts):
+        return True
+    if host == SJTU_CANVAS_HOST and "/login" in parsed.path.lower():
+        return True
+    haystack = html[:5000].lower()
+    has_password = "type=\"password\"" in haystack or "type='password'" in haystack
+    has_login_form = "<form" in haystack and any(term in haystack for term in ("jaccount", "统一身份认证", "captcha"))
+    return has_password or has_login_form
 
 
 def _cookie_domain_matches(cookie_domain: str, host: str) -> bool:
     domain = cookie_domain.lstrip(".").lower()
     host = host.lower()
     return host == domain or host.endswith(f".{domain}")
+
+
+def _has_canvas_cookie(cookies: list[dict[str, Any]]) -> bool:
+    return any(
+        _cookie_domain_matches(str(cookie.get("domain") or ""), SJTU_CANVAS_HOST)
+        or _cookie_domain_matches(str(cookie.get("domain") or ""), "sjtu.edu.cn")
+        for cookie in cookies
+    )
+
+
+def _cookie_domains(cookies: list[dict[str, Any]]) -> list[str]:
+    domains = sorted({str(cookie.get("domain") or "") for cookie in cookies if cookie.get("domain")})
+    return domains[:20]
+
+
+def _canvas_login_ready(url: str, html: str, cookies: list[dict[str, Any]]) -> bool:
+    parsed = urlparse(url)
+    host = (parsed.hostname or parsed.netloc).lower()
+    on_canvas = host == SJTU_CANVAS_HOST or host.endswith(f".{SJTU_CANVAS_HOST}")
+    return on_canvas and not _looks_like_canvas_login_page(url, html) and _has_canvas_cookie(cookies)
 
 
 def _cookie_header_for_url(url: str, cookies: list[dict[str, Any]]) -> str:
@@ -339,6 +902,338 @@ def _cookie_header_for_url(url: str, cookies: list[dict[str, Any]]) -> str:
     return "; ".join(pairs)
 
 
+def _read_text_response(opener: Any, url: str, *, data: dict[str, Any] | None = None, timeout: int = 30) -> str:
+    headers = {
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+    body = None
+    if data is not None:
+        body = urlencode(data).encode("utf-8")
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+    request = Request(url, data=body, headers=headers, method="POST" if data is not None else "GET")
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            payload = response.read()
+            charset = response.headers.get_content_charset() or "utf-8"
+            return payload.decode(charset, errors="replace")
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:500]
+        if exc.code in {401, 403}:
+            raise MediaError("Canvas/SJTU video session is not authorized. Prepare Canvas login again.") from exc
+        raise MediaError(f"SJTU video request failed with HTTP {exc.code}: {detail}") from exc
+    except URLError as exc:
+        raise MediaError(f"SJTU video request failed: {exc.reason}") from exc
+
+
+def _read_json_response(opener: Any, url: str, *, data: dict[str, Any], timeout: int = 30) -> dict[str, Any]:
+    text = _read_text_response(opener, url, data=data, timeout=timeout)
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise MediaError("SJTU video API returned non-JSON data. Prepare Canvas login again.") from exc
+    return payload if isinstance(payload, dict) else {}
+
+
+def _html_inputs(html: str) -> dict[str, str]:
+    inputs = re.findall(
+        r"<input[^>]*name=[\"']([^\"']+)[\"'][^>]*value=[\"']([^\"']*)[\"']",
+        html,
+        re.IGNORECASE | re.DOTALL,
+    )
+    return {unescape(name): unescape(value) for name, value in inputs}
+
+
+def _lti_form_action(html: str) -> str:
+    match = re.search(r"<form[^>]*action=[\"']([^\"']+)[\"']", html, re.IGNORECASE | re.DOTALL)
+    return unescape(match.group(1)) if match else ""
+
+
+def _sjtu_video_lti_launch(app: AppContext, course_id: str) -> tuple[str, Any, CookieJar]:
+    opener, jar = _sjtu_video_opener(app)
+    url = f"{app.config.canvas.base_url.rstrip('/')}/courses/{quote(str(course_id), safe='')}/external_tools/{SJTU_CANVAS_VIDEO_TOOL_ID}"
+    html = _read_text_response(opener, url)
+    action = _lti_form_action(html)
+    form_data = _html_inputs(html)
+    if not action or not form_data:
+        raise MediaError(
+            "SJTU video LTI launch form was not found. The course may not enable the SJTU lecture video tool "
+            "or the Canvas login state has expired."
+        )
+    landing = _read_text_response(opener, action, data=form_data)
+    match = re.search(r'var\s+canvasCourseId\s*=\s*"([^"]+)"', landing)
+    if not match:
+        raise MediaError(
+            "SJTU video LTI launch succeeded but canvasCourseId was not found. "
+            "Prepare Canvas login again or open the course video tool once in the managed browser."
+        )
+    return match.group(1), opener, jar
+
+
+def _cookie_header_from_jar(jar: CookieJar, url: str) -> str:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    path = parsed.path or "/"
+    pairs: list[str] = []
+    for cookie in jar:
+        if not _cookie_domain_matches(cookie.domain, host):
+            continue
+        cookie_path = cookie.path or "/"
+        if cookie_path != "/" and not path.startswith(cookie_path):
+            continue
+        pairs.append(f"{cookie.name}={cookie.value}")
+    return "; ".join(pairs)
+
+
+def _extract_sjtu_video_streams(data_object: dict[str, Any], jar: CookieJar) -> list[CanvasLectureStream]:
+    streams: list[CanvasLectureStream] = []
+    for item in data_object.get("videoPlayResponseVoList") or []:
+        if not isinstance(item, dict):
+            continue
+        for key, quality in (
+            ("rtmpUrlHdv", "hdv"),
+            ("rtmpUrlFluency", "fluency"),
+            ("rtmpUrlDistinct", "distinct"),
+            ("rtmpUrlDefault", "default"),
+        ):
+            url = str(item.get(key) or "")
+            if url:
+                headers = {"Referer": f"https://{SJTU_COURSES_HOST}/"}
+                cookie_header = _cookie_header_from_jar(jar, url)
+                if cookie_header:
+                    headers["Cookie"] = cookie_header
+                streams.append(CanvasLectureStream(quality=quality, url=url, request_headers=headers))
+    return streams
+
+
+def _sjtu_vod_list(app: AppContext, course_id: str, *, page_size: int = 1000) -> tuple[list[dict[str, Any]], Any, CookieJar]:
+    canvas_course_id, opener, jar = _sjtu_video_lti_launch(app, course_id)
+    payload = {
+        "pageIndex": 1,
+        "pageSize": page_size,
+        "canvasCourseId": canvas_course_id,
+    }
+    data = _read_json_response(opener, f"https://{SJTU_COURSES_HOST}/lti/vodVideo/findVodVideoList", data=payload)
+    if data.get("code") != 200:
+        raise MediaError(f"SJTU VOD list API returned error: {data.get('desc') or data.get('code')}")
+    body = data.get("body") if isinstance(data.get("body"), dict) else {}
+    items = body.get("list") if isinstance(body, dict) else []
+    return [item for item in items if isinstance(item, dict)], opener, jar
+
+
+def _sjtu_vod_video_info(opener: Any, video_id: str) -> dict[str, Any]:
+    payload = {
+        "playTypeHls": "true",
+        "id": video_id,
+        "isAudit": "true",
+    }
+    data = _read_json_response(opener, f"https://{SJTU_COURSES_HOST}/lti/vodVideo/getVodVideoInfos", data=payload)
+    if data.get("code") != 200:
+        raise MediaError(f"SJTU VOD info API returned error: {data.get('desc') or data.get('code')}")
+    body = data.get("body")
+    return body if isinstance(body, dict) else {}
+
+
+def _canvas_lecture_from_vod_item(item: dict[str, Any]) -> CanvasLectureVideo:
+    return CanvasLectureVideo(
+        id=str(item.get("videoId") or item.get("id") or ""),
+        name=str(item.get("videoName") or item.get("courName") or item.get("courseName") or ""),
+        category="vod",
+        teacher=str(item.get("userName") or item.get("teacherName") or ""),
+        classroom=str(item.get("classroomName") or ""),
+        begin_time=str(item.get("courseBeginTime") or item.get("courBeginTime") or item.get("startTime") or ""),
+        end_time=str(item.get("courseEndTime") or item.get("courEndTime") or item.get("endTime") or ""),
+        status=str(item.get("videAuditStatus") or item.get("status") or ""),
+        raw=item,
+    )
+
+
+def _load_sjtu_course_vods(app: AppContext, course_id: str, *, fetch_stream_info: bool = True) -> list[CanvasLectureVideo]:
+    items, opener, jar = _sjtu_vod_list(app, course_id)
+    videos: list[CanvasLectureVideo] = []
+    for item in items:
+        video = _canvas_lecture_from_vod_item(item)
+        if fetch_stream_info and video.id:
+            try:
+                info = _sjtu_vod_video_info(opener, video.id)
+                video.streams = _extract_sjtu_video_streams(info, jar)
+                video.name = str(info.get("courName") or info.get("videoName") or video.name)
+                video.teacher = str(info.get("teacherName") or info.get("userName") or video.teacher)
+                video.begin_time = str(info.get("courBeginTime") or info.get("courseBeginTime") or video.begin_time)
+                video.end_time = str(info.get("courEndTime") or info.get("courseEndTime") or video.end_time)
+            except Exception:
+                pass
+        videos.append(video)
+    return videos
+
+
+def _select_sjtu_lecture_videos(app: AppContext, request: str, videos: list[CanvasLectureVideo]) -> dict[str, Any]:
+    if not videos:
+        return {"videos": [], "selection": {"strategy": "none", "reason": "No SJTU VOD videos returned."}}
+
+    summaries = [video.safe_summary(index) for index, video in enumerate(videos[:MAX_MODEL_SELECTION_ITEMS])]
+    model_choice = _model_choice(
+        app,
+        task="select_sjtu_lecture_video",
+        choices=summaries,
+        system_prompt=(
+            "You select SJTU Canvas lecture recording(s) for a student's natural-language request. "
+            "Return strict JSON only: {\"indexes\":[number],\"reason\":\"short reason\"}. "
+            "Use lecture name, begin/end time, teacher, and the user's date/topic wording. "
+            "Pick multiple only if the request clearly asks for multiple recordings."
+        ),
+        user_prompt=json.dumps({"request": request, "videos": summaries}, ensure_ascii=False),
+        allow_multiple=True,
+    )
+    indexes = model_choice["indexes"]
+    if not indexes:
+        sorted_indexes = sorted(
+            range(len(videos)),
+            key=lambda idx: (
+                _score_text_match(
+                    " ".join(
+                        [
+                            videos[idx].name,
+                            videos[idx].teacher,
+                            videos[idx].classroom,
+                            videos[idx].begin_time,
+                            videos[idx].end_time,
+                        ]
+                    ),
+                    request,
+                ),
+                -idx,
+            ),
+            reverse=True,
+        )
+        indexes = sorted_indexes[:1]
+        model_choice = {
+            "strategy": "heuristic",
+            "indexes": indexes,
+            "reason": "Selected by lecture metadata keyword/date overlap.",
+        }
+    return {"videos": [videos[index] for index in indexes if 0 <= index < len(videos)], "selection": model_choice}
+
+
+def _select_sjtu_video_stream(video: CanvasLectureVideo) -> dict[str, Any] | None:
+    if not video.streams:
+        return None
+    quality_rank = {"hdv": 0, "distinct": 1, "default": 2, "fluency": 3}
+    stream = sorted(video.streams, key=lambda item: quality_rank.get(item.quality, 9))[0]
+    candidate = stream.to_candidate()
+    candidate["lecture_id"] = video.id
+    candidate["lecture_name"] = video.name
+    candidate["page_title"] = video.name
+    candidate["page_url"] = f"https://{SJTU_COURSES_HOST}/lti/vodVideo/getVodVideoInfos"
+    headers = dict(candidate.get("request_headers") or {})
+    headers.setdefault("Referer", f"https://{SJTU_COURSES_HOST}/")
+    candidate["request_headers"] = headers
+    return candidate
+
+
+def plan_sjtu_video_transcription(
+    app: AppContext,
+    request: str,
+    *,
+    max_candidates: int = 20,
+    check_login: bool = True,
+    _safe: bool = True,
+    progress: Callable[[float, str], None] | None = None,
+) -> dict[str, Any]:
+    value = request.strip()
+    if not value:
+        raise ValueError("request is required")
+
+    def report(fraction: float, message: str) -> None:
+        if progress is not None:
+            progress(fraction, message)
+
+    login_check: dict[str, Any] | None = None
+    if check_login:
+        report(0.03, "Checking SJTUFlow Canvas login state")
+        login_check = check_canvas_browser_login(app, wait_seconds=6, headless=True)
+        if not login_check.get("logged_in"):
+            payload = {
+                "status": "requires_browser_login",
+                "request": value,
+                "course": None,
+                "course_selection": {"strategy": "none", "reason": "Canvas browser profile is not logged in."},
+                "video_search": None,
+                "video_selection": {"strategy": "none", "reason": str(login_check.get("message") or "")},
+                "selected_videos": [],
+                "selected_streams": [],
+                "login_check": login_check,
+                "message": (
+                    "请先在媒体页点击“准备 Canvas 登录态”，在 SJTUFlow 托管浏览器中完成 Canvas 登录，"
+                    "然后重新提交同一个媒体转写任务。"
+                ),
+                "video_saved_locally": False,
+                "transcript_saved_by_default": True,
+            }
+            return _safe_canvas_request_plan(payload) if _safe else payload
+
+    try:
+        report(0.05, "Listing Canvas courses")
+        courses = app.canvas.list_courses(limit=80)
+    except Exception as exc:
+        raise MediaError("Unable to list Canvas courses. Configure Canvas token first.") from exc
+    selected_course = _select_course(app, value, courses)
+    course = selected_course.get("course")
+    course_selection = selected_course.get("selection") or {}
+    if course is None:
+        raise MediaError("No Canvas course could be selected from the configured account.")
+
+    report(0.18, "Loading SJTU lecture recordings through Canvas LTI")
+    try:
+        videos = _load_sjtu_course_vods(app, str(getattr(course, "id", "")), fetch_stream_info=True)
+    except MediaError:
+        raise
+    except Exception as exc:
+        raise MediaError(f"Unable to load SJTU lecture recordings: {exc}") from exc
+
+    videos = videos[: max(1, int(max_candidates))]
+    video_selection_result = _select_sjtu_lecture_videos(app, value, videos)
+    selected_videos = video_selection_result.get("videos") or []
+    selected_streams: list[dict[str, Any]] = []
+    for video in selected_videos:
+        stream = _select_sjtu_video_stream(video)
+        if stream:
+            selected_streams.append(stream)
+
+    if selected_streams:
+        status = "ready"
+        message = f"Selected {len(selected_streams)} SJTU lecture recording stream(s)."
+    elif selected_videos:
+        status = "no_stream_found"
+        message = "SJTU lecture recordings were found, but no playable stream URL was returned for the selected recording(s)."
+    elif videos:
+        status = "no_candidates"
+        message = "SJTU lecture recordings were found, but none matched the request."
+    else:
+        status = "no_candidates"
+        message = "No SJTU lecture recordings were returned for the selected Canvas course."
+
+    payload = {
+        "status": status,
+        "request": value,
+        "course": getattr(course, "__dict__", None),
+        "course_selection": course_selection,
+        "video_search": {
+            "source": "sjtu_lti_vod",
+            "tool_url": f"{app.config.canvas.base_url.rstrip('/')}/courses/{getattr(course, 'id', '')}/external_tools/{SJTU_CANVAS_VIDEO_TOOL_ID}",
+            "candidate_count": len(videos),
+            "candidates": [video.safe_summary(index) for index, video in enumerate(videos)],
+        },
+        "video_selection": video_selection_result.get("selection") or {},
+        "selected_videos": [video.safe_summary() for video in selected_videos],
+        "selected_streams": selected_streams,
+        "login_check": login_check,
+        "message": message,
+        "video_saved_locally": False,
+        "transcript_saved_by_default": True,
+    }
+    return _safe_canvas_request_plan(payload) if _safe else payload
+
+
 def _browser_request_headers(
     stream_url: str,
     *,
@@ -355,6 +1250,181 @@ def _browser_request_headers(
     if cookie_header:
         headers["Cookie"] = cookie_header
     return headers
+
+
+def check_canvas_browser_login(
+    app: AppContext,
+    *,
+    url: str | None = None,
+    wait_seconds: int = 6,
+    headless: bool = True,
+) -> dict[str, Any]:
+    """Check whether the managed browser profile already has Canvas login state.
+
+    This never asks the user to log in. It opens the persistent profile briefly,
+    verifies Canvas cookies plus page state, then closes the context.
+    """
+
+    try:
+        from playwright.sync_api import Error as PlaywrightError
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise MediaError("Playwright is not installed. Run `uv sync` and then `uv run playwright install chromium`.") from exc
+
+    target_url = url or app.config.canvas.base_url.rstrip("/")
+    profile_dir = _browser_profile_dir(app)
+    storage_state_path = _browser_storage_state_path(app)
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    wait_ms = max(1, int(wait_seconds)) * 1000
+    final_url = target_url
+    html = ""
+    cookies: list[dict[str, Any]] = []
+
+    try:
+        with sync_playwright() as playwright:
+            browser = None
+            context = None
+            try:
+                if storage_state_path.exists():
+                    browser = playwright.chromium.launch(headless=headless)
+                    context = browser.new_context(storage_state=str(storage_state_path), accept_downloads=False)
+                    page = context.new_page()
+                else:
+                    context = playwright.chromium.launch_persistent_context(
+                        user_data_dir=str(profile_dir),
+                        headless=headless,
+                        accept_downloads=False,
+                    )
+                page = context.pages[0] if context.pages else context.new_page()
+                try:
+                    page.goto(target_url, wait_until="domcontentloaded", timeout=wait_ms)
+                except PlaywrightTimeoutError:
+                    pass
+
+                deadline = time.monotonic() + max(1, int(wait_seconds))
+                while time.monotonic() < deadline:
+                    try:
+                        final_url = page.url
+                        html = page.content()
+                        cookies = [dict(cookie) for cookie in context.cookies()]
+                    except PlaywrightError:
+                        pass
+                    if _canvas_login_ready(final_url, html, cookies) or _looks_like_canvas_login_page(final_url, html):
+                        break
+                    page.wait_for_timeout(500)
+            finally:
+                if context is not None:
+                    context.close()
+                if browser is not None:
+                    browser.close()
+    except PlaywrightError as exc:
+        detail = str(exc)
+        if "Executable doesn't exist" in detail or "playwright install" in detail:
+            raise MediaError("Playwright Chromium is not installed. Run `uv run playwright install chromium`.") from exc
+        raise MediaError(f"Browser login check failed: {detail}") from exc
+
+    logged_in = _canvas_login_ready(final_url, html, cookies)
+    return {
+        "status": "logged_in" if logged_in else "login_required",
+        "logged_in": logged_in,
+        "url": target_url,
+        "final_url": final_url,
+        "canvas_cookie_seen": _has_canvas_cookie(cookies),
+        "cookie_domains": _cookie_domains(cookies),
+        "browser_session": "sjtuflow-managed",
+        "browser_profile": str(profile_dir),
+        "storage_state": str(storage_state_path),
+        "storage_state_exists": storage_state_path.exists(),
+        "message": (
+            "Canvas login state is available in the SJTUFlow browser profile."
+            if logged_in
+            else "Canvas login state is not available yet. Click Prepare Canvas Login and finish login once."
+        ),
+    }
+
+
+def ensure_canvas_browser_login(
+    app: AppContext,
+    *,
+    url: str | None = None,
+    wait_seconds: int = DEFAULT_LOGIN_WAIT_SECONDS,
+    headless: bool = False,
+) -> dict[str, Any]:
+    """Open the managed browser until Canvas login is available, then close it.
+
+    This is a session setup step. It does not scan for videos. Once cookies are
+    present in the persistent profile, later media tasks can reuse them.
+    """
+
+    try:
+        from playwright.sync_api import Error as PlaywrightError
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise MediaError("Playwright is not installed. Run `uv sync` and then `uv run playwright install chromium`.") from exc
+
+    target_url = url or app.config.canvas.base_url.rstrip("/")
+    profile_dir = _browser_profile_dir(app)
+    storage_state_path = _browser_storage_state_path(app)
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    wait_ms = max(1, int(wait_seconds)) * 1000
+    final_url = target_url
+    html = ""
+    cookies: list[dict[str, Any]] = []
+
+    try:
+        with sync_playwright() as playwright:
+            context = playwright.chromium.launch_persistent_context(
+                user_data_dir=str(profile_dir),
+                headless=headless,
+                accept_downloads=False,
+            )
+            try:
+                page = context.pages[0] if context.pages else context.new_page()
+                try:
+                    page.goto(target_url, wait_until="domcontentloaded", timeout=wait_ms)
+                except PlaywrightTimeoutError:
+                    pass
+
+                deadline = time.monotonic() + max(1, int(wait_seconds))
+                while time.monotonic() < deadline:
+                    try:
+                        final_url = page.url
+                        html = page.content()
+                        cookies = [dict(cookie) for cookie in context.cookies()]
+                    except PlaywrightError:
+                        pass
+                    if _canvas_login_ready(final_url, html, cookies):
+                        try:
+                            context.storage_state(path=str(storage_state_path))
+                            cookies = [dict(cookie) for cookie in context.cookies()]
+                        except PlaywrightError:
+                            pass
+                        break
+                    page.wait_for_timeout(1000)
+            finally:
+                context.close()
+    except PlaywrightError as exc:
+        detail = str(exc)
+        if "Executable doesn't exist" in detail or "playwright install" in detail:
+            raise MediaError("Playwright Chromium is not installed. Run `uv run playwright install chromium`.") from exc
+        raise MediaError(f"Browser login setup failed: {detail}") from exc
+
+    logged_in = _canvas_login_ready(final_url, html, cookies)
+    return {
+        "status": "logged_in" if logged_in else "login_required",
+        "logged_in": logged_in,
+        "url": target_url,
+        "final_url": final_url,
+        "canvas_cookie_seen": _has_canvas_cookie(cookies),
+        "cookie_domains": _cookie_domains(cookies),
+        "browser_session": "sjtuflow-managed",
+        "browser_profile": str(profile_dir),
+        "storage_state": str(storage_state_path),
+        "storage_state_exists": storage_state_path.exists(),
+        "message": "Canvas login is ready." if logged_in else "Please finish Canvas login in the SJTUFlow browser window.",
+    }
 
 
 def _capture_browser_media_page(
@@ -374,6 +1444,7 @@ def _capture_browser_media_page(
         raise MediaError("Playwright is not installed. Run `uv sync` and then `uv run playwright install chromium`.") from exc
 
     profile_dir = _browser_profile_dir(app)
+    storage_state_path = _browser_storage_state_path(app)
     profile_dir.mkdir(parents=True, exist_ok=True)
     wait_ms = max(1, int(wait_seconds)) * 1000
     seen_urls: set[str] = set()
@@ -388,12 +1459,19 @@ def _capture_browser_media_page(
 
     try:
         with sync_playwright() as playwright:
-            context = playwright.chromium.launch_persistent_context(
-                user_data_dir=str(profile_dir),
-                headless=headless,
-                accept_downloads=False,
-            )
+            browser = None
+            context = None
             try:
+                if storage_state_path.exists():
+                    browser = playwright.chromium.launch(headless=headless)
+                    context = browser.new_context(storage_state=str(storage_state_path), accept_downloads=False)
+                    page = context.new_page()
+                else:
+                    context = playwright.chromium.launch_persistent_context(
+                        user_data_dir=str(profile_dir),
+                        headless=headless,
+                        accept_downloads=False,
+                    )
                 page = context.pages[0] if context.pages else context.new_page()
                 page.on("request", lambda request: remember(request.url))
                 page.on("response", lambda response: remember(response.url))
@@ -440,7 +1518,10 @@ def _capture_browser_media_page(
                 except PlaywrightError:
                     cookies = []
             finally:
-                context.close()
+                if context is not None:
+                    context.close()
+                if browser is not None:
+                    browser.close()
     except PlaywrightError as exc:
         detail = str(exc)
         if "Executable doesn't exist" in detail or "playwright install" in detail:
@@ -455,6 +1536,8 @@ def _capture_browser_media_page(
         "cookies": cookies,
         "user_agent": user_agent,
         "profile_dir": str(profile_dir),
+        "storage_state": str(storage_state_path),
+        "storage_state_exists": storage_state_path.exists(),
         "login_required": _looks_like_canvas_login_page(final_url, html),
     }
 
@@ -474,31 +1557,101 @@ def _capture_browser_html_page(
         raise MediaError("Playwright is not installed. Run `uv sync` and then `uv run playwright install chromium`.") from exc
 
     profile_dir = _browser_profile_dir(app)
+    storage_state_path = _browser_storage_state_path(app)
     profile_dir.mkdir(parents=True, exist_ok=True)
     wait_ms = max(1, int(wait_seconds)) * 1000
     final_url = url
     html = ""
     title = ""
+    text = ""
+    frames: list[dict[str, str]] = []
+
+    def capture_state(page) -> None:
+        nonlocal final_url, html, title, text, frames
+        try:
+            final_url = page.url
+            html = page.content()
+            title = page.title()
+        except PlaywrightError:
+            pass
+        try:
+            text = page.locator("body").inner_text(timeout=750)
+        except (PlaywrightError, PlaywrightTimeoutError):
+            text = ""
+
+        captured_frames: list[dict[str, str]] = []
+        for frame in page.frames:
+            if frame == page.main_frame:
+                continue
+            frame_url = str(frame.url or "")
+            if not frame_url or frame_url == "about:blank":
+                continue
+            frame_title = ""
+            frame_text = ""
+            frame_html = ""
+            try:
+                frame_title = str(frame.evaluate("() => document.title") or "")
+            except (PlaywrightError, PlaywrightTimeoutError):
+                pass
+            try:
+                frame_text = str(frame.locator("body").inner_text(timeout=750) or "")
+            except (PlaywrightError, PlaywrightTimeoutError):
+                pass
+            try:
+                frame_html = str(frame.content() or "")
+            except (PlaywrightError, PlaywrightTimeoutError):
+                pass
+            if frame_text or frame_html:
+                captured_frames.append(
+                    {
+                        "url": frame_url,
+                        "title": frame_title,
+                        "text": frame_text,
+                        "html": frame_html,
+                    }
+                )
+        frames = captured_frames
 
     try:
         with sync_playwright() as playwright:
-            context = playwright.chromium.launch_persistent_context(
-                user_data_dir=str(profile_dir),
-                headless=headless,
-                accept_downloads=False,
-            )
+            browser = None
+            context = None
             try:
+                if storage_state_path.exists():
+                    browser = playwright.chromium.launch(headless=headless)
+                    context = browser.new_context(storage_state=str(storage_state_path), accept_downloads=False)
+                    page = context.new_page()
+                else:
+                    context = playwright.chromium.launch_persistent_context(
+                        user_data_dir=str(profile_dir),
+                        headless=headless,
+                        accept_downloads=False,
+                    )
                 page = context.pages[0] if context.pages else context.new_page()
                 try:
                     page.goto(url, wait_until="domcontentloaded", timeout=wait_ms)
                 except PlaywrightTimeoutError:
                     pass
-                page.wait_for_timeout(min(wait_ms, 3000))
-                final_url = page.url
-                html = page.content()
-                title = page.title()
+                deadline = time.monotonic() + max(1, int(wait_seconds))
+                while time.monotonic() < deadline:
+                    capture_state(page)
+                    if not _looks_like_canvas_login_page(final_url, html):
+                        break
+                    # Keep the managed browser open long enough for first-time
+                    # Canvas/JAccount login instead of closing after a flash.
+                    page.wait_for_timeout(1000)
+                if not _looks_like_canvas_login_page(final_url, html):
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=5000)
+                    except PlaywrightTimeoutError:
+                        pass
+                    capture_state(page)
+                capture_state(page)
             finally:
-                context.close()
+                if context is not None:
+                    context.close()
+                if browser is not None:
+                    browser.close()
     except PlaywrightError as exc:
         detail = str(exc)
         if "Executable doesn't exist" in detail or "playwright install" in detail:
@@ -510,7 +1663,11 @@ def _capture_browser_html_page(
         "final_url": final_url,
         "html": html,
         "title": title,
+        "text": text,
+        "frames": frames,
         "profile_dir": str(profile_dir),
+        "storage_state": str(storage_state_path),
+        "storage_state_exists": storage_state_path.exists(),
         "login_required": _looks_like_canvas_login_page(final_url, html),
     }
 
@@ -614,12 +1771,12 @@ def resolve_canvas_page_media(
     url: str,
     *,
     wait_seconds: int = DEFAULT_BROWSER_WAIT_SECONDS,
-    headless: bool = False,
+    headless: bool = True,
 ) -> dict[str, Any]:
     """Resolve a Canvas external_tools media page through SJTUFlow's browser profile.
 
-    The first call may open a Chromium window where the user logs in. The
-    profile is stored under the local state directory and reused on later calls.
+    This expects the managed browser profile to be logged in already. Use
+    ``ensure_canvas_browser_login`` as the explicit setup step when needed.
     """
 
     value = url.strip()
@@ -736,8 +1893,10 @@ def find_canvas_media_pages(
     query: str = "",
     pages: list[str] | None = None,
     wait_seconds: int = 20,
+    login_wait_seconds: int = DEFAULT_LOGIN_WAIT_SECONDS,
     max_candidates: int = 20,
     headless: bool = False,
+    progress: Callable[[float, str], None] | None = None,
 ) -> dict[str, Any]:
     """Find external_tools candidates in a Canvas course through the managed browser."""
 
@@ -753,9 +1912,14 @@ def find_canvas_media_pages(
 
     query_terms = [term.lower() for term in re.split(r"\s+", query.strip()) if term.strip()]
 
-    for page_name in page_names:
+    def report(fraction: float, message: str) -> None:
+        if progress is not None:
+            progress(fraction, message)
+
+    for page_offset, page_name in enumerate(page_names):
         url = _course_page_url(app, course_id, page_name)
-        captured = _capture_browser_html_page(app, url, wait_seconds=wait_seconds, headless=headless)
+        report(0.05 + page_offset * 0.4, f"Searching Canvas {page_name} page for lecture links")
+        captured = _capture_browser_html_page(app, url, wait_seconds=login_wait_seconds, headless=headless)
         final_url = str(captured.get("final_url") or url)
         html = str(captured.get("html") or "")
         page_login_required = bool(captured.get("login_required"))
@@ -771,6 +1935,8 @@ def find_canvas_media_pages(
                 "candidate_count": len(candidates),
             }
         )
+        if page_login_required and not candidates:
+            break
         for candidate in candidates:
             candidate_url = str(candidate.get("url") or "")
             if not candidate_url or candidate_url in seen:
@@ -790,7 +1956,10 @@ def find_canvas_media_pages(
     status = "found" if all_candidates else "requires_browser_login" if login_required else "no_candidates"
     message = ""
     if status == "requires_browser_login":
-        message = "Log in to Canvas in the SJTUFlow managed browser window, then retry the page search."
+        message = (
+            "请在 SJTUFlow 打开的浏览器窗口完成 Canvas 登录。"
+            "登录完成后，重新提交同一个媒体转写任务。"
+        )
     elif status == "no_candidates":
         message = "No Canvas external_tools links were found on the checked course pages."
 
@@ -927,13 +2096,122 @@ def extract_audio(
 # --------------------------------------------------------------------------- #
 
 
-def _transcribe_faster_whisper(audio_path: Path, language: str | None, model_size: str) -> TranscriptResult:
+def _faster_whisper_repo_hint(model: str) -> str:
+    if "/" in model:
+        return model
+    return f"Systran/faster-whisper-{model}"
+
+
+def _asr_options(app: AppContext, model_size: str | None = None) -> FasterWhisperOptions:
+    config = app.config.asr
+    model_path = str(config.model_path or "").strip()
+    if model_path:
+        path = Path(model_path).expanduser()
+        if not path.exists():
+            raise MediaError(
+                f"Configured ASR model_path does not exist: {path}. "
+                "Set [asr].model_path to a local faster-whisper/CTranslate2 model directory, "
+                "or leave it empty and make the Hugging Face model cache available."
+            )
+        model_path = str(path.resolve())
+
+    download_root = str(config.download_root or "").strip()
+    if download_root:
+        download_root = str(Path(download_root).expanduser())
+
+    return FasterWhisperOptions(
+        model=model_size or config.model or "base",
+        model_path=model_path,
+        download_root=download_root,
+        local_files_only=bool(config.local_files_only),
+        device=config.device or "cpu",
+        compute_type=config.compute_type or "int8",
+    )
+
+
+def _exception_text(exc: BaseException) -> str:
+    parts: list[str] = []
+    current: BaseException | None = exc
+    while current is not None:
+        parts.append(f"{type(current).__name__}: {current}")
+        current = current.__cause__ or current.__context__
+    return " | ".join(parts)
+
+
+def _is_huggingface_model_resolution_error(exc: BaseException) -> bool:
+    text = _exception_text(exc)
+    return any(
+        marker in text
+        for marker in (
+            "LocalEntryNotFoundError",
+            "Temporary failure in name resolution",
+            "NameResolutionError",
+            "ConnectError",
+            "ConnectionError",
+            "snapshot_download",
+            "huggingface_hub",
+        )
+    )
+
+
+def _asr_model_resolution_message(options: FasterWhisperOptions, exc: BaseException) -> str:
+    if options.model_path:
+        return (
+            f"Local ASR model at {options.model_path} could not be loaded by faster-whisper. "
+            "Make sure this is a CTranslate2 faster-whisper model directory containing model.bin, "
+            "config.json, tokenizer.json and preprocessor_config.json. "
+            f"Original error: {_exception_text(exc)}"
+        )
+
+    repo_hint = _faster_whisper_repo_hint(options.model)
+    cache_hint = options.download_root or "~/.cache/huggingface/hub"
+    offline_hint = (
+        "asr.local_files_only=true prevents downloads, and the model was not found in the local cache."
+        if options.local_files_only
+        else "The backend tried to download it, but Hugging Face is unreachable from this environment."
+    )
+    return (
+        f"ASR model '{options.model}' ({repo_hint}) is not available locally. {offline_hint} "
+        f"Cache checked: {cache_hint}. "
+        "Fix DNS/network access to huggingface.co and pre-download it with: "
+        f"uv run python -c \"from faster_whisper import WhisperModel; "
+        f"WhisperModel('{options.model}', device='{options.device}', compute_type='{options.compute_type}')\". "
+        "If this machine cannot access Hugging Face, copy a faster-whisper/CTranslate2 model directory locally "
+        "and set [asr].model_path to that directory."
+    )
+
+
+def _transcribe_faster_whisper(
+    audio_path: Path,
+    language: str | None,
+    options: FasterWhisperOptions | str,
+) -> TranscriptResult:
     try:
         from faster_whisper import WhisperModel
     except ImportError as exc:
         raise MediaError("faster-whisper is not installed. Run: pip install faster-whisper") from exc
 
-    model = WhisperModel(model_size, device="cpu", compute_type="int8")
+    if isinstance(options, str):
+        options = FasterWhisperOptions(model=options)
+
+    try:
+        model = WhisperModel(
+            options.model_size_or_path,
+            device=options.device,
+            compute_type=options.compute_type,
+            download_root=options.download_root or None,
+            local_files_only=options.local_files_only,
+        )
+    except ValueError as exc:
+        raise MediaError(
+            f"Invalid ASR model '{options.model}'. Use a valid faster-whisper model name, "
+            "a Hugging Face model id, or set [asr].model_path to a local CTranslate2 model directory."
+        ) from exc
+    except Exception as exc:
+        if _is_huggingface_model_resolution_error(exc):
+            raise MediaError(_asr_model_resolution_message(options, exc)) from exc
+        raise
+
     raw_segments, info = model.transcribe(str(audio_path), language=language)
     segments = [
         TranscriptSegment(start=segment.start or 0.0, end=segment.end or 0.0, text=segment.text or "")
@@ -968,7 +2246,7 @@ def transcribe_media(
     provider: str = "local-whisper",
     language: str | None = None,
     *,
-    model_size: str = "base",
+    model_size: str | None = None,
     progress: Callable[[float, str], None] | None = None,
 ) -> TranscriptResult:
     """Transcribe a local media file to timed segments.
@@ -998,9 +2276,9 @@ def transcribe_media(
 
     report(0.4, f"Transcribing with {provider}")
     if provider in {"local-whisper", "faster-whisper", "whisper"}:
-        result = _transcribe_faster_whisper(audio_path, language, model_size)
+        result = _transcribe_faster_whisper(audio_path, language, _asr_options(app, model_size))
     elif provider == "openai-whisper":
-        result = _transcribe_openai_whisper(audio_path, language, model_size)
+        result = _transcribe_openai_whisper(audio_path, language, model_size or app.config.asr.model or "base")
     else:
         raise MediaError(f"Unknown transcription provider: {provider}")
 
@@ -1194,7 +2472,7 @@ def transcribe_canvas_page_media(
     *,
     overwrite: bool = False,
     wait_seconds: int = DEFAULT_BROWSER_WAIT_SECONDS,
-    headless: bool = False,
+    headless: bool = True,
     progress: Callable[[float, str], None] | None = None,
 ) -> dict[str, Any]:
     """Resolve a Canvas media page with the managed browser, then transcribe and save."""
@@ -1205,10 +2483,13 @@ def transcribe_canvas_page_media(
 
     report(0.02, "Resolving Canvas media page in managed browser")
     resolved = resolve_canvas_page_media(app, url, wait_seconds=wait_seconds, headless=headless)
-    stream_url = str(resolved.get("stream_url") or "")
-    if not stream_url:
+    selected = _select_page_streams(app, " ".join([title, description, url]), resolved)
+    streams = selected.get("streams") or []
+    if not streams:
         message = str(resolved.get("message") or "No media stream URL found in the Canvas page.")
         raise MediaError(message)
+    stream = streams[0]
+    stream_url = str(stream.get("stream_url") or "")
 
     result = transcribe_stream_to_transcript(
         app,
@@ -1218,7 +2499,7 @@ def transcribe_canvas_page_media(
         language=language,
         description=description,
         overwrite=overwrite,
-        request_headers=resolved.get("request_headers") if isinstance(resolved.get("request_headers"), dict) else None,
+        request_headers=stream.get("request_headers") if isinstance(stream.get("request_headers"), dict) else None,
         progress=lambda fraction, message: report(0.05 + fraction * 0.95, message),
     )
     result["resolved_media"] = {
@@ -1227,8 +2508,312 @@ def transcribe_canvas_page_media(
         "candidate_count": len(resolved.get("candidates") or []),
         "browser_session": resolved.get("browser_session"),
         "final_url": resolved.get("final_url"),
+        "selected_stream": safe_resolution_payload({"stream_url": stream_url, "candidates": [stream]})["candidates"][0],
+        "stream_selection": selected.get("selection"),
     }
     return result
+
+
+def plan_canvas_media_transcription(
+    app: AppContext,
+    request: str,
+    *,
+    wait_seconds: int = DEFAULT_BROWSER_WAIT_SECONDS,
+    login_wait_seconds: int | None = None,
+    max_candidates: int = 20,
+    check_login: bool = True,
+    page_headless: bool = True,
+    _safe: bool = True,
+    progress: Callable[[float, str], None] | None = None,
+) -> dict[str, Any]:
+    """Resolve a natural-language Canvas media request into selected pages/streams.
+
+    This is the high-level planning step used by the web UI. It can accept an
+    explicit Canvas URL or a natural-language course/date/topic description.
+    Course and page/stream selection use the configured LLM when available and
+    fall back to deterministic metadata scoring for tests and dry-run setups.
+    ``login_wait_seconds`` is kept as a deprecated compatibility parameter; it
+    no longer opens an interactive browser during transcription planning.
+    """
+
+    value = request.strip()
+    if not value:
+        raise ValueError("request is required")
+
+    def report(fraction: float, message: str) -> None:
+        if progress is not None:
+            progress(fraction, message)
+
+    urls = _extract_urls(value)
+    canvas_page_urls = [url for url in urls if urlparse(url).hostname and "/external_tools/" in urlparse(url).path]
+    if not canvas_page_urls:
+        return plan_sjtu_video_transcription(
+            app,
+            value,
+            max_candidates=max_candidates,
+            check_login=check_login,
+            _safe=_safe,
+            progress=progress,
+        )
+
+    course: Any | None = None
+    course_selection: dict[str, Any] = {"strategy": "explicit_url", "reason": "The request includes a Canvas media URL."}
+    page_candidates_result: dict[str, Any] | None = None
+
+    login_check: dict[str, Any] | None = None
+    if check_login:
+        report(0.03, "Checking SJTUFlow Canvas login profile")
+        login_check = check_canvas_browser_login(app, wait_seconds=6, headless=True)
+        if not login_check.get("logged_in"):
+            payload = {
+                "status": "requires_browser_login",
+                "request": value,
+                "course": None,
+                "course_selection": {"strategy": "none", "reason": "Canvas browser profile is not logged in."},
+                "page_search": None,
+                "page_selection": {"strategy": "none", "reason": str(login_check.get("message") or "")},
+                "selected_pages": [],
+                "selected_streams": [],
+                "login_check": login_check,
+                "message": (
+                    "请先在媒体页点击“准备 Canvas 登录态”，在 SJTUFlow 托管浏览器中完成 Canvas 登录，"
+                    "然后重新提交同一个媒体转写任务。"
+                ),
+                "video_saved_locally": False,
+                "transcript_saved_by_default": True,
+            }
+            return _safe_canvas_request_plan(payload) if _safe else payload
+
+    if canvas_page_urls:
+        selected_pages = [
+            {
+                "url": urlunparse((*urlparse(url)[:3], "", "", "")),
+                "display_url": _redact_url(url),
+                "title": "",
+                "text": "",
+                "source_page": "explicit",
+                "score": 0,
+            }
+            for url in canvas_page_urls
+        ]
+        page_selection = {
+            "strategy": "explicit_url",
+            "indexes": list(range(len(selected_pages))),
+            "reason": "The user supplied explicit Canvas external_tools URL(s).",
+        }
+    else:
+        try:
+            report(0.04, "Listing Canvas courses")
+            courses = app.canvas.list_courses(limit=80)
+        except Exception as exc:
+            raise MediaError(
+                "Unable to list Canvas courses. Configure Canvas token first, or paste a Canvas external_tools URL."
+            ) from exc
+        report(0.08, "Selecting Canvas course")
+        selected_course = _select_course(app, value, courses)
+        course = selected_course.get("course")
+        course_selection = selected_course.get("selection") or {}
+        if course is None:
+            raise MediaError("No Canvas course could be selected from the configured account.")
+
+        report(0.12, "Finding Canvas ExternalTool links with Canvas API")
+        page_candidates_result = _canvas_external_tool_candidates_from_api(app, str(getattr(course, "id", "")), value)
+        if not page_candidates_result.get("candidates"):
+            page_candidates_result = {
+                "status": "no_candidates",
+                "course_id": str(getattr(course, "id", "")),
+                "query": value,
+                "visited_pages": [{"page": "canvas_api_modules", "candidate_count": 0}],
+                "candidates": [],
+                "requires_browser_login": False,
+                "browser_session": "not_used",
+                "message": (
+                    "Canvas API did not return module ExternalTool links in this compatibility path. "
+                    "Natural-language lecture recording requests should use the SJTU LTI/VOD path."
+                ),
+            }
+        if page_candidates_result.get("requires_browser_login"):
+            payload = {
+                "status": "requires_browser_login",
+                "request": value,
+                "course": getattr(course, "__dict__", None),
+                "course_selection": course_selection,
+                "page_search": page_candidates_result,
+                "page_selection": {"strategy": "none", "reason": page_candidates_result.get("message") or ""},
+                "selected_pages": [],
+                "selected_streams": [],
+                "login_check": login_check,
+                "message": page_candidates_result.get("message") or "Canvas login is required.",
+                "video_saved_locally": False,
+                "transcript_saved_by_default": True,
+            }
+            return _safe_canvas_request_plan(payload) if _safe else payload
+        page_selection_result = _select_canvas_pages(app, value, page_candidates_result.get("candidates") or [])
+        selected_pages = page_selection_result.get("pages") or []
+        page_selection = page_selection_result.get("selection") or {}
+
+    resolved_pages: list[dict[str, Any]] = []
+    selected_streams: list[dict[str, Any]] = []
+    stream_selections: list[dict[str, Any]] = []
+    login_required = False
+    no_stream_pages = 0
+
+    total_pages = max(1, len(selected_pages))
+    for page_index, page in enumerate(selected_pages):
+        url = str(page.get("url") or "")
+        if not url:
+            continue
+        report(0.48 + (page_index / total_pages) * 0.35, f"Opening selected Canvas media page {page_index + 1}")
+        resolved = resolve_canvas_page_media(app, url, wait_seconds=wait_seconds, headless=page_headless)
+        login_required = login_required or bool(resolved.get("requires_browser_login"))
+        report(0.55 + (page_index / total_pages) * 0.35, f"Selecting media stream {page_index + 1}")
+        page_streams = _select_page_streams(app, value, resolved)
+        streams = page_streams.get("streams") or []
+        if not streams:
+            no_stream_pages += 1
+        for stream in streams:
+            item = dict(stream)
+            item["page_index"] = page_index
+            item["page_title"] = page.get("title") or page.get("text") or ""
+            selected_streams.append(item)
+        stream_selections.append(
+            {
+                "page_url": url,
+                "selection": page_streams.get("selection"),
+                "candidate_count": len(resolved.get("candidates") or []),
+            }
+        )
+        resolved_pages.append(
+            {
+                **page,
+                "resolved_media": resolved,
+                "stream_selection": page_streams.get("selection"),
+            }
+        )
+
+    if login_required and not selected_streams:
+        status = "requires_browser_login"
+        message = "请在 SJTUFlow 打开的浏览器窗口登录 Canvas，然后重试同一个媒体任务。"
+    elif selected_streams:
+        status = "ready"
+        message = f"Selected {len(selected_streams)} media stream(s) for transcription."
+    elif no_stream_pages:
+        status = "no_stream_found"
+        message = "SJTUFlow loaded the selected Canvas page(s), but no supported video/audio stream was observed."
+    else:
+        status = "no_candidates"
+        message = "No Canvas media page or SJTU VOD recording was selected from the request."
+
+    payload = {
+        "status": status,
+        "request": value,
+        "course": getattr(course, "__dict__", None) if course is not None else None,
+        "course_selection": course_selection,
+        "page_search": page_candidates_result,
+        "page_selection": page_selection,
+        "selected_pages": resolved_pages,
+        "selected_streams": selected_streams,
+        "stream_selections": stream_selections,
+        "login_check": login_check,
+        "message": message,
+        "video_saved_locally": False,
+        "transcript_saved_by_default": True,
+    }
+    return _safe_canvas_request_plan(payload) if _safe else payload
+
+
+def transcribe_canvas_request_media(
+    app: AppContext,
+    request: str,
+    title: str | None = None,
+    provider: str = "local-whisper",
+    language: str | None = None,
+    description: str = "",
+    *,
+    overwrite: bool = False,
+    wait_seconds: int = DEFAULT_BROWSER_WAIT_SECONDS,
+    login_wait_seconds: int | None = None,
+    max_candidates: int = 20,
+    check_login: bool = True,
+    page_headless: bool = True,
+    progress: Callable[[float, str], None] | None = None,
+) -> dict[str, Any]:
+    """Plan and transcribe a natural-language Canvas media request."""
+
+    value = request.strip()
+    if not value:
+        raise ValueError("request is required")
+
+    def report(fraction: float, message: str) -> None:
+        if progress is not None:
+            progress(fraction, message)
+
+    report(0.02, "Planning Canvas media transcription")
+    plan = plan_canvas_media_transcription(
+        app,
+        value,
+        wait_seconds=wait_seconds,
+        login_wait_seconds=login_wait_seconds,
+        max_candidates=max_candidates,
+        check_login=check_login,
+        page_headless=page_headless,
+        _safe=False,
+        progress=lambda fraction, message: report(0.02 + fraction * 0.18, message),
+    )
+    if plan.get("status") != "ready":
+        raise MediaError(str(plan.get("message") or "Canvas media request is not ready for transcription."))
+
+    selected_streams = list(plan.get("selected_streams") or [])
+    if not selected_streams:
+        raise MediaError("No selected media streams to transcribe.")
+
+    internal_streams = list(plan.get("selected_streams") or [])
+    if not internal_streams:
+        raise MediaError("No selected media streams to transcribe.")
+
+    course = plan.get("course") or {}
+    course_name = str(course.get("name") or "") if isinstance(course, dict) else ""
+    base_title = title or course_name or "Canvas Lecture"
+    results: list[dict[str, Any]] = []
+    total = len(internal_streams)
+    for index, stream in enumerate(internal_streams):
+        stream_title = base_title if total == 1 else f"{base_title} {index + 1}"
+        page_title = str(stream.get("page_title") or "")
+        desc_parts = [description.strip(), f"Request: {value}"]
+        if page_title:
+            desc_parts.append(f"Canvas page: {page_title}")
+        stream_url = str(stream.get("stream_url") or "")
+        if not stream_url:
+            continue
+        start = 0.08 + (index / total) * 0.9
+        span = 0.9 / total
+        result = transcribe_stream_to_transcript(
+            app,
+            stream_url,
+            stream_title,
+            provider=provider,
+            language=language,
+            description="\n".join(part for part in desc_parts if part),
+            overwrite=overwrite,
+            request_headers=stream.get("request_headers") if isinstance(stream.get("request_headers"), dict) else None,
+            progress=lambda fraction, message, start=start, span=span: report(start + fraction * span, message),
+        )
+        result["selected_stream"] = safe_resolution_payload({"stream_url": stream_url, "candidates": [stream]})[
+            "candidates"
+        ][0]
+        results.append(result)
+
+    report(1.0, "Done")
+    return {
+        "status": "succeeded",
+        "request": value,
+        "title": base_title,
+        "transcripts": [_metadata_without_transcript(item) for item in results],
+        "count": len(results),
+        "plan": _safe_canvas_request_plan(plan),
+        "video_saved_locally": False,
+        "transcript_saved_by_default": True,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -1357,6 +2942,46 @@ def register_media_tools(registry: ToolRegistry) -> None:
         return canvas_media_access_hint(url)
 
     @registry.tool(
+        name="media.ensure_canvas_login",
+        description=(
+            "Open SJTUFlow's managed Canvas browser profile and wait until the user finishes Canvas login. "
+            "This only prepares/reuses browser login state; it does not search pages or transcribe media."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Optional Canvas URL to open; defaults to Canvas home."},
+                "wait_seconds": {"type": "integer", "default": DEFAULT_LOGIN_WAIT_SECONDS},
+            },
+            "required": [],
+            "additionalProperties": False,
+        },
+        risk_level="read",
+    )
+    def ensure_canvas_login(ctx: ToolContext, url: str | None = None, wait_seconds: int = DEFAULT_LOGIN_WAIT_SECONDS):
+        return ensure_canvas_browser_login(ctx.app, url=url, wait_seconds=wait_seconds)
+
+    @registry.tool(
+        name="media.check_canvas_login",
+        description=(
+            "Check whether SJTUFlow's managed Canvas browser profile is already logged in. "
+            "This is non-interactive and never opens a visible login window."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Optional Canvas URL to check; defaults to Canvas home."},
+                "wait_seconds": {"type": "integer", "default": 6},
+            },
+            "required": [],
+            "additionalProperties": False,
+        },
+        risk_level="read",
+    )
+    def check_canvas_login(ctx: ToolContext, url: str | None = None, wait_seconds: int = 6):
+        return check_canvas_browser_login(ctx.app, url=url, wait_seconds=wait_seconds)
+
+    @registry.tool(
         name="media.resolve_stream",
         description=(
             "Debug fallback: resolve a direct media URL, local HTML snippet/file, or authorized media page into stream "
@@ -1382,7 +3007,7 @@ def register_media_tools(registry: ToolRegistry) -> None:
         name="media.resolve_canvas_page",
         description=(
             "Open a SJTU Canvas external_tools media page with SJTUFlow's managed browser profile and resolve media "
-            "stream candidates. If the profile is not logged in, this opens a browser window for the user to log in."
+            "stream candidates. Use media.ensure_canvas_login first if the profile is not logged in."
         ),
         input_schema={
             "type": "object",
@@ -1394,7 +3019,7 @@ def register_media_tools(registry: ToolRegistry) -> None:
                 "wait_seconds": {
                     "type": "integer",
                     "default": DEFAULT_BROWSER_WAIT_SECONDS,
-                    "description": "How long to wait while the page logs in, loads, or starts the player.",
+                    "description": "Maximum time to wait while the final media page loads or starts the player.",
                 },
             },
             "required": ["url"],
@@ -1403,14 +3028,14 @@ def register_media_tools(registry: ToolRegistry) -> None:
         risk_level="read",
     )
     def resolve_canvas_page(ctx: ToolContext, url: str, wait_seconds: int = DEFAULT_BROWSER_WAIT_SECONDS):
-        return safe_resolution_payload(resolve_canvas_page_media(ctx.app, url, wait_seconds=wait_seconds))
+        return safe_resolution_payload(resolve_canvas_page_media(ctx.app, url, wait_seconds=wait_seconds, headless=True))
 
     @registry.tool(
         name="media.find_canvas_pages",
         description=(
-            "Search a Canvas course home/modules page with SJTUFlow's managed browser profile and return "
-            "external_tools candidate pages, such as lecture media pages. Use before resolve/transcribe when "
-            "the user names a course but has not supplied the exact Canvas media URL."
+            "Debug fallback: search Canvas course home/modules pages with SJTUFlow's managed browser profile and return "
+            "external_tools candidate pages. Prefer Canvas API module tools and media.plan_canvas_request for normal "
+            "natural-language media transcription."
         ),
         input_schema={
             "type": "object",
@@ -1446,6 +3071,44 @@ def register_media_tools(registry: ToolRegistry) -> None:
             query=query,
             wait_seconds=wait_seconds,
             max_candidates=max_candidates,
+        )
+
+    @registry.tool(
+        name="media.plan_canvas_request",
+        description=(
+            "Plan a Canvas media transcription from natural language or explicit external_tools URLs. "
+            "Natural-language requests use Canvas courses plus the SJTU lecture-video LTI/VOD API; explicit URLs use "
+            "the managed browser compatibility path. "
+            "Returns only sanitized metadata; no signed stream URLs or cookies are exposed."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "request": {
+                    "type": "string",
+                    "description": "Natural-language course/date/topic request or Canvas external_tools URL.",
+                },
+                "wait_seconds": {"type": "integer", "default": DEFAULT_BROWSER_WAIT_SECONDS},
+                "max_candidates": {"type": "integer", "default": 20},
+            },
+            "required": ["request"],
+            "additionalProperties": False,
+        },
+        risk_level="read",
+    )
+    def plan_canvas_request(
+        ctx: ToolContext,
+        request: str,
+        wait_seconds: int = DEFAULT_BROWSER_WAIT_SECONDS,
+        max_candidates: int = 20,
+    ):
+        return plan_canvas_media_transcription(
+            ctx.app,
+            request,
+            wait_seconds=wait_seconds,
+            max_candidates=max_candidates,
+            check_login=True,
+            page_headless=True,
         )
 
     @registry.tool(
@@ -1653,7 +3316,7 @@ def register_media_tools(registry: ToolRegistry) -> None:
                 "wait_seconds": {
                     "type": "integer",
                     "default": DEFAULT_BROWSER_WAIT_SECONDS,
-                    "description": "How long to wait while the page logs in, loads, or starts the player.",
+                    "description": "Maximum time to wait while the final media page loads or starts the player.",
                 },
             },
             "required": ["url", "title"],
@@ -1683,6 +3346,60 @@ def register_media_tools(registry: ToolRegistry) -> None:
             wait_seconds=wait_seconds,
         )
         return _metadata_without_transcript(result)
+
+    @registry.tool(
+        name="media.transcribe_canvas_request",
+        description=(
+            "Transcribe Canvas lecture media from a natural-language course/date/topic request or explicit external_tools "
+            "URL. The tool uses Canvas token for course discovery and SJTUFlow's managed browser for the media page, "
+            "then saves transcript(s) by default without saving source video. Run media.ensure_canvas_login first if needed."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "request": {
+                    "type": "string",
+                    "description": "Natural-language course/date/topic request or Canvas external_tools URL.",
+                },
+                "title": {"type": "string", "description": "Optional base transcript title."},
+                "provider": {"type": "string", "default": "local-whisper"},
+                "language": {"type": "string", "description": "Optional language hint, e.g. 'zh' or 'en'."},
+                "description": {"type": "string", "default": ""},
+                "overwrite": {"type": "boolean", "default": False},
+                "wait_seconds": {"type": "integer", "default": DEFAULT_BROWSER_WAIT_SECONDS},
+                "max_candidates": {"type": "integer", "default": 20},
+            },
+            "required": ["request"],
+            "additionalProperties": False,
+        },
+        risk_level="write",
+        requires_confirmation=True,
+    )
+    def transcribe_canvas_request(
+        ctx: ToolContext,
+        request: str,
+        title: str | None = None,
+        provider: str = "local-whisper",
+        language: str | None = None,
+        description: str = "",
+        overwrite: bool = False,
+        wait_seconds: int = DEFAULT_BROWSER_WAIT_SECONDS,
+        max_candidates: int = 20,
+    ):
+        result = transcribe_canvas_request_media(
+            ctx.app,
+            request,
+            title=title,
+            provider=provider,
+            language=language,
+            description=description,
+            overwrite=overwrite,
+            wait_seconds=wait_seconds,
+            max_candidates=max_candidates,
+            check_login=True,
+            page_headless=True,
+        )
+        return result
 
     @registry.tool(
         name="media.save_transcript",

@@ -116,6 +116,14 @@ class LocalAppService:
                 "token_configured": bool(config.canvas.resolved_token()),
                 "access_token_env": config.canvas.access_token_env,
             },
+            "asr": {
+                "model": config.asr.model,
+                "model_path": config.asr.model_path,
+                "download_root": config.asr.download_root,
+                "local_files_only": config.asr.local_files_only,
+                "device": config.asr.device,
+                "compute_type": config.asr.compute_type,
+            },
             "skills_loaded": len(skills),
             "tools_registered": len(registry.list()),
         }
@@ -297,6 +305,16 @@ class LocalAppService:
 
         return canvas_media_access_hint(url)
 
+    def media_ensure_canvas_login(
+        self,
+        url: str | None = None,
+        *,
+        wait_seconds: int = 120,
+    ) -> dict[str, Any]:
+        from sjtuflow.tools.media import ensure_canvas_browser_login
+
+        return ensure_canvas_browser_login(self.app_context(), url=url, wait_seconds=wait_seconds)
+
     def media_resolve_stream(
         self,
         source: str,
@@ -316,7 +334,7 @@ class LocalAppService:
         from sjtuflow.tools.media import resolve_canvas_page_media, safe_resolution_payload
 
         return safe_resolution_payload(
-            resolve_canvas_page_media(self.app_context(), url, wait_seconds=wait_seconds)
+            resolve_canvas_page_media(self.app_context(), url, wait_seconds=wait_seconds, headless=True)
         )
 
     def media_find_canvas_pages(
@@ -335,6 +353,26 @@ class LocalAppService:
             query=query,
             wait_seconds=wait_seconds,
             max_candidates=max_candidates,
+        )
+
+    def media_plan_canvas_request(
+        self,
+        request: str,
+        *,
+        wait_seconds: int = 45,
+        login_wait_seconds: int | None = None,
+        max_candidates: int = 20,
+    ) -> dict[str, Any]:
+        from sjtuflow.tools.media import plan_canvas_media_transcription
+
+        return plan_canvas_media_transcription(
+            self.app_context(),
+            request,
+            wait_seconds=wait_seconds,
+            login_wait_seconds=login_wait_seconds,
+            max_candidates=max_candidates,
+            check_login=True,
+            page_headless=True,
         )
 
     def media_transcribe_stream(
@@ -435,6 +473,45 @@ class LocalAppService:
 
         runner = self.jobs.run_sync if sync else self.jobs.submit
         return runner("media.transcribe_canvas_page", worker)
+
+    def media_transcribe_canvas_request(
+        self,
+        request: str,
+        title: str | None = None,
+        provider: str = "local-whisper",
+        language: str | None = None,
+        description: str = "",
+        *,
+        overwrite: bool = False,
+        wait_seconds: int = 45,
+        login_wait_seconds: int | None = None,
+        max_candidates: int = 20,
+        sync: bool = False,
+    ) -> dict[str, Any]:
+        from sjtuflow.tools.media import transcribe_canvas_request_media
+
+        def worker(handle: JobHandle) -> dict[str, Any]:
+            def progress(fraction: float, message: str) -> None:
+                handle.update(progress=fraction, message=message)
+
+            return transcribe_canvas_request_media(
+                self.app_context(),
+                request,
+                title=title,
+                provider=provider,
+                language=language,
+                description=description,
+                overwrite=overwrite,
+                wait_seconds=wait_seconds,
+                login_wait_seconds=login_wait_seconds,
+                max_candidates=max_candidates,
+                check_login=True,
+                page_headless=True,
+                progress=progress,
+            )
+
+        runner = self.jobs.run_sync if sync else self.jobs.submit
+        return runner("media.transcribe_canvas_request", worker)
 
     def media_save_transcript(
         self,

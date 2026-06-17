@@ -413,6 +413,15 @@ button {
   gap: 14px;
 }
 
+.form-section {
+  margin-top: 4px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+  color: #40505b;
+  font-size: 13px;
+  font-weight: 800;
+}
+
 .span-2 {
   grid-column: 1 / -1;
 }
@@ -577,6 +586,121 @@ button {
   background: #fbfcfd;
   color: var(--muted);
   font-size: 13px;
+}
+
+.message.pending {
+  opacity: 0.82;
+}
+
+.message.progress {
+  justify-self: start;
+  min-width: min(560px, 100%);
+  background: #fbfcfd;
+  border-color: #d6e0e7;
+}
+
+.thinking-line {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: #40505b;
+  font-weight: 700;
+}
+
+.thinking-steps {
+  margin: 10px 0 0;
+  padding-left: 23px;
+  color: var(--muted);
+}
+
+.spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid #c7d4de;
+  border-top-color: var(--link);
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+  flex: 0 0 auto;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.markdown-body {
+  display: grid;
+  gap: 8px;
+}
+
+.markdown-body p,
+.markdown-body ul,
+.markdown-body pre,
+.markdown-body h3,
+.markdown-body h4,
+.markdown-body h5 {
+  margin: 0;
+}
+
+.markdown-body ul {
+  padding-left: 22px;
+}
+
+.markdown-body li + li {
+  margin-top: 5px;
+}
+
+.markdown-body code {
+  padding: 2px 5px;
+  border-radius: 5px;
+  background: #eef3f6;
+  font-family:
+    "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.92em;
+}
+
+.markdown-body pre {
+  overflow: auto;
+  padding: 12px;
+  border-radius: 7px;
+  background: #f4f7f9;
+}
+
+.markdown-body pre code {
+  padding: 0;
+  background: transparent;
+}
+
+.hidden-context {
+  justify-self: stretch;
+  max-width: none;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfd;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.hidden-context summary {
+  cursor: pointer;
+  padding: 10px 12px;
+  font-weight: 800;
+}
+
+.tool-log {
+  display: grid;
+  gap: 8px;
+  padding: 0 12px 12px;
+}
+
+.tool-log-item {
+  max-height: 160px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
 }
 
 .composer {

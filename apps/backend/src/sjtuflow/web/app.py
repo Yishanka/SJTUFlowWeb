@@ -43,6 +43,11 @@ class MediaAccessHintRequest(BaseModel):
     url: str
 
 
+class MediaEnsureCanvasLoginRequest(BaseModel):
+    url: str | None = None
+    wait_seconds: int = 120
+
+
 class MediaResolveStreamRequest(BaseModel):
     source: str
     request_headers: dict[str, str] | None = None
@@ -57,6 +62,13 @@ class MediaFindCanvasPagesRequest(BaseModel):
     course_id: str
     query: str = ""
     wait_seconds: int = 20
+    max_candidates: int = 20
+
+
+class MediaCanvasRequestPlanRequest(BaseModel):
+    request: str
+    wait_seconds: int = 45
+    login_wait_seconds: int | None = None
     max_candidates: int = 20
 
 
@@ -113,6 +125,19 @@ class MediaTranscribeCanvasPageRequest(BaseModel):
     description: str = ""
     overwrite: bool = False
     wait_seconds: int = 45
+    sync: bool = False
+
+
+class MediaTranscribeCanvasRequestRequest(BaseModel):
+    request: str
+    title: str | None = None
+    provider: str = "local-whisper"
+    language: str | None = None
+    description: str = ""
+    overwrite: bool = False
+    wait_seconds: int = 45
+    login_wait_seconds: int | None = None
+    max_candidates: int = 20
     sync: bool = False
 
 
@@ -229,6 +254,15 @@ def create_app(*, service: LocalAppService | None = None, frontend_dir: Path | N
     async def media_canvas_access_hint(request: MediaAccessHintRequest):
         return await run_service(app, "media_canvas_access_hint", request.url)
 
+    @app.post("/api/media/ensure-canvas-login")
+    async def media_ensure_canvas_login(request: MediaEnsureCanvasLoginRequest):
+        return await run_service(
+            app,
+            "media_ensure_canvas_login",
+            request.url,
+            wait_seconds=request.wait_seconds,
+        )
+
     @app.post("/api/media/resolve-stream")
     async def media_resolve_stream(request: MediaResolveStreamRequest):
         return await run_service(
@@ -255,6 +289,17 @@ def create_app(*, service: LocalAppService | None = None, frontend_dir: Path | N
             request.course_id,
             query=request.query,
             wait_seconds=request.wait_seconds,
+            max_candidates=request.max_candidates,
+        )
+
+    @app.post("/api/media/plan-canvas-request")
+    async def media_plan_canvas_request(request: MediaCanvasRequestPlanRequest):
+        return await run_service(
+            app,
+            "media_plan_canvas_request",
+            request.request,
+            wait_seconds=request.wait_seconds,
+            login_wait_seconds=request.login_wait_seconds,
             max_candidates=request.max_candidates,
         )
 
@@ -331,6 +376,23 @@ def create_app(*, service: LocalAppService | None = None, frontend_dir: Path | N
             request.description,
             overwrite=request.overwrite,
             wait_seconds=request.wait_seconds,
+            sync=request.sync,
+        )
+
+    @app.post("/api/media/transcribe-canvas-request")
+    async def media_transcribe_canvas_request(request: MediaTranscribeCanvasRequestRequest):
+        return await run_service(
+            app,
+            "media_transcribe_canvas_request",
+            request.request,
+            request.title,
+            request.provider,
+            request.language,
+            request.description,
+            overwrite=request.overwrite,
+            wait_seconds=request.wait_seconds,
+            login_wait_seconds=request.login_wait_seconds,
+            max_candidates=request.max_candidates,
             sync=request.sync,
         )
 

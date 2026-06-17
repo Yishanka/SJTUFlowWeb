@@ -14,7 +14,7 @@
 - Chat workspace：历史会话列表、消息流、工具状态。
 - Skills：metadata 列表、全文查看、创建/编辑入口，区分内置 skill 与用户 skill。
 - Transcripts：metadata 列表、全文查看、搜索、重命名、删除、摘要刷新。
-- Media：本地媒体转写、Canvas 课程视频页面转写、Canvas external_tools 候选页查找。
+- Media：本地媒体转写、Canvas 课程录播自然语言定位与转写。
 - Settings：模型配置、Canvas token、资料目录、权限策略、doctor。
 
 接口：
@@ -35,8 +35,9 @@
 - `DELETE /api/skills/{name}`
 - `GET /api/transcripts`
 - `GET /api/transcripts/{transcript_id}`
-- `POST /api/media/find-canvas-pages`
-- `POST /api/media/transcribe-canvas-page`
+- `POST /api/media/plan-canvas-request`
+- `POST /api/media/ensure-canvas-login`
+- `POST /api/media/transcribe-canvas-request`
 - `POST /api/media/transcribe-and-save`
 - `GET /api/jobs`
 
@@ -60,8 +61,11 @@
 
 ```text
 media.canvas_access_hint(url: str)
+media.ensure_canvas_login(url: str | None = None, wait_seconds: int = 120)
+media.check_canvas_login(url: str | None = None, wait_seconds: int = 6)
 media.find_canvas_pages(course_id: str, query: str = "", wait_seconds: int = 20)
 media.resolve_canvas_page(url: str, wait_seconds: int = 45)
+media.plan_canvas_request(request: str, wait_seconds: int = 45)
 media.resolve_stream(source: str)  # debug fallback
 media.probe(path: str)
 media.extract_audio(path: str, out_dir: str | None = None)
@@ -69,6 +73,7 @@ media.transcribe(path: str, provider: str = "local-whisper", language: str | Non
 media.transcribe_and_save(path: str, title: str | None = None, provider: str = "local-whisper", language: str | None = None)
 media.transcribe_stream(stream_url: str, title: str, provider: str = "local-whisper", language: str | None = None)
 media.transcribe_canvas_page(url: str, title: str, provider: str = "local-whisper", language: str | None = None)
+media.transcribe_canvas_request(request: str, title: str | None = None, provider: str = "local-whisper", language: str | None = None)
 media.transcribe_source(source: str, title: str, provider: str = "local-whisper", language: str | None = None)  # debug fallback
 media.save_transcript(title: str, content: str, source: str = "", description: str = "")
 ```
@@ -77,8 +82,10 @@ media.save_transcript(title: str, content: str, source: str = "", description: s
 
 ```text
 POST /api/media/canvas-access-hint
+POST /api/media/ensure-canvas-login
 POST /api/media/find-canvas-pages
 POST /api/media/resolve-canvas-page
+POST /api/media/plan-canvas-request
 POST /api/media/resolve-stream
 POST /api/media/probe
 POST /api/media/extract-audio
@@ -86,6 +93,7 @@ POST /api/media/transcribe
 POST /api/media/transcribe-and-save
 POST /api/media/transcribe-stream
 POST /api/media/transcribe-canvas-page
+POST /api/media/transcribe-canvas-request
 POST /api/media/transcribe-source
 POST /api/media/save-transcript
 GET  /api/jobs/{job_id}
@@ -94,10 +102,14 @@ GET  /api/jobs/{job_id}
 实现要求：
 
 - 优先处理用户主动提供的本地文件。
-- SJTU Canvas `external_tools` 媒体页通常不能只靠 Canvas token 抓取；主流程是使用 SJTUFlow 托管的本地浏览器 profile 打开页面。第一次使用时用户需要在该浏览器窗口里登录 Canvas，后续后端复用这个 profile。
+- SJTU Canvas 录播媒体流通常不能只靠 Canvas token 抓取；自然语言主流程使用 Canvas token 选择课程，再用已保存的 SJTUFlow Canvas 登录 state 启动 SJTU 课程视频 LTI 工具 `external_tools/9487`，调用 `courses.sjtu.edu.cn` VOD API 获取回放和流地址。
+- 第一次使用时用户先点“准备 Canvas 登录态”，在 SJTUFlow 托管浏览器里登录 Canvas；登录完成后显式保存 `canvas-storage-state.json`，后续复用该 state。转写任务只做短暂登录态检查，未登录时直接提示用户，不要反复弹登录窗口。
 - 不读取用户日常 Chrome/Safari/Edge profile 的 cookie；不要设计成偷取或复制系统浏览器登录态。
-- 后端用 `media.resolve_canvas_page` 从托管浏览器页面、DOM、network resource 中解析候选流；返回给 agent/API 时必须脱敏签名参数，不暴露 Cookie/request headers。
-- 如果用户只给课程名/日期，agent 可先用 `canvas.list_courses` 匹配 `course_id`，再用 `media.find_canvas_pages` 从课程主页/模块页收集 external_tools 候选。候选不唯一时需要用户确认，不能盲目转写第一个链接。
+- 后端自然语言主流程不再扫描课程页面找 arbitrary ExternalTool；它固定走 SJTU 课程视频 LTI/VOD。`media.resolve_canvas_page` 仅作为显式 URL 调试路径，从托管浏览器页面、DOM、network resource 中解析候选流；返回给 agent/API 时必须脱敏签名参数，不暴露 Cookie/request headers。
+- 用户只给课程名/日期/自然语言问题时，主流程走 `media.plan_canvas_request` / `media.transcribe_canvas_request`：后端先用 Canvas token 列课程，再用 LTI/VOD 列该课程回放，最后由 LLM 或启发式元数据打分选择具体视频与流。
+- `media.find_canvas_pages` 仅作为开发/调试兜底，不作为普通用户自动路径。
+- LLM 只接收脱敏后的候选元数据和索引，不接收签名 stream URL、Cookie 或 request headers；真正转写仍在后端内部用授权 headers 调 ffmpeg。
+- 单个页面有多个媒体流时不能盲目取第一个；必须根据模型选择或 fallback 规则优先选择更像正片的视频流，例如 browser network 捕获到的 `.m3u8` / `.mp4`。
 - `media.resolve_stream` / `media.transcribe_source` 仅作为调试兜底，支持直接媒体 URL 或本地 HTML 片段/文件；不要把“复制 HTML”作为用户主流程。
 - 模型回复时要明确说明这个限制，不要暗示可以绕过认证。
 - 不绕过视频平台 DRM、验证码或权限限制。
@@ -112,10 +124,10 @@ GET  /api/jobs/{job_id}
 1. 用户问“今天 xxx 课程中老师是否提到有签到？”。
 2. Agent 先调用 `transcripts.list` 查本地资料库是否已有今天该课程的 transcript。
 3. 如果已有，按需 `transcripts.read` 读取全文并回答。
-4. 如果没有，agent 使用 `lecture-signin-check` skill：若用户只给课程名，先 `canvas.list_courses` 匹配课程，再 `media.find_canvas_pages` 找课程里的 external_tools 视频候选；候选不唯一时请用户确认。
-5. 拿到 Canvas external_tools URL 后调用 `media.resolve_canvas_page`。若返回需要登录，提示用户在 SJTUFlow 打开的浏览器窗口完成 Canvas 登录后重试。
-6. 解析到媒体流后，后端调用 `POST /api/media/transcribe-canvas-page` 或 `media.transcribe_canvas_page`，用 ffmpeg 流式抽取临时音频，转写完成后默认保存 transcript 到 `~/SJTUFlowData/transcripts/`。
-7. Agent 再按 metadata-first 规则读取新 transcript，回答是否提到签到，并指出来源 transcript。
+4. 如果没有 transcript，聊天侧默认不直接启动重型抓取/ASR；前端 Media 页提供一个统一输入框，用户填“今天 xxx 课程老师是否提到签到？”或粘贴 external_tools URL 作为调试路径。
+5. 前端调用 `POST /api/media/transcribe-canvas-request`。后端自动匹配课程，通过 SJTU 课程视频 LTI/VOD 列回放并选择最相关视频流；若需要登录，提示用户先点“准备 Canvas 登录态”。
+6. 后端用 ffmpeg 流式抽取临时音频，转写完成后默认保存 transcript 到 `~/SJTUFlowData/transcripts/`。
+7. 用户回到聊天或 transcript 页，Agent 再按 metadata-first 规则读取新 transcript，回答是否提到签到，并指出来源 transcript。
 
 本地视频模式：
 

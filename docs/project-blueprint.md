@@ -91,7 +91,7 @@ uv run sjtuflow web
 - 不做多用户 SaaS 或远端账号系统。
 - 不建立中央数据库；默认使用本地配置、资料目录、缓存和审计日志。
 - 不绕过学校平台的登录、验证码、DRM 或权限限制。
-- 不承诺 Canvas token 能获取 `external_tools` 媒体流；这类页面需要浏览器登录态。SJTUFlow 使用自己托管的本地浏览器 profile，不读取用户日常浏览器 cookie。
+- 不承诺 Canvas token 能获取课程视频媒体流；SJTUFlow 使用自己托管的本地浏览器 profile 准备登录态并保存 state。自然语言录播主流程通过 SJTU 课程视频 LTI/VOD 接口获取回放与流地址，不读取用户日常浏览器 cookie。
 - 不自动提交作业、发送邮件、删除文件或修改远端内容。
 - 不在启动时全量同步所有课程资料。
 

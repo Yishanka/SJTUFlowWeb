@@ -53,6 +53,28 @@ class CanvasFile:
     local_path: str = ""
 
 
+@dataclass
+class CanvasModule:
+    id: str
+    course_id: str
+    name: str = ""
+    position: int = 0
+    workflow_state: str = ""
+
+
+@dataclass
+class CanvasModuleItem:
+    id: str
+    course_id: str
+    module_id: str = ""
+    title: str = ""
+    type: str = ""
+    position: int = 0
+    html_url: str = ""
+    external_url: str = ""
+    page_url: str = ""
+
+
 class CanvasClient:
     def __init__(self, config: CanvasConfig) -> None:
         self.config = config
@@ -232,6 +254,69 @@ class CanvasClient:
             )
         return files
 
+    def list_modules(self, course_id: str, *, limit: int = 100) -> list[CanvasModule]:
+        raw_modules = self._paginate(
+            f"/api/v1/courses/{urllib.parse.quote(str(course_id))}/modules",
+            {},
+            limit=limit,
+        )
+        modules: list[CanvasModule] = []
+        for item in raw_modules:
+            if not isinstance(item, dict):
+                continue
+            modules.append(
+                CanvasModule(
+                    id=str(item.get("id", "")),
+                    course_id=str(course_id),
+                    name=str(item.get("name") or item.get("id")),
+                    position=int(item.get("position") or 0),
+                    workflow_state=str(item.get("workflow_state") or ""),
+                )
+            )
+        return modules
+
+    def list_module_items(self, course_id: str, module_id: str, *, limit: int = 100) -> list[CanvasModuleItem]:
+        raw_items = self._paginate(
+            (
+                f"/api/v1/courses/{urllib.parse.quote(str(course_id))}/modules/"
+                f"{urllib.parse.quote(str(module_id))}/items"
+            ),
+            {},
+            limit=limit,
+        )
+        items: list[CanvasModuleItem] = []
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            items.append(
+                CanvasModuleItem(
+                    id=str(item.get("id", "")),
+                    course_id=str(course_id),
+                    module_id=str(module_id),
+                    title=str(item.get("title") or item.get("name") or item.get("id")),
+                    type=str(item.get("type") or ""),
+                    position=int(item.get("position") or 0),
+                    html_url=str(item.get("html_url") or ""),
+                    external_url=str(item.get("external_url") or item.get("url") or ""),
+                    page_url=str(item.get("page_url") or ""),
+                )
+            )
+        return items
+
+    def list_external_tool_module_items(
+        self,
+        course_id: str,
+        *,
+        limit_modules: int = 50,
+        limit_items_per_module: int = 100,
+    ) -> list[CanvasModuleItem]:
+        results: list[CanvasModuleItem] = []
+        for module in self.list_modules(course_id, limit=limit_modules):
+            for item in self.list_module_items(course_id, module.id, limit=limit_items_per_module):
+                if item.type.lower() == "externaltool" or "/external_tools/" in item.html_url:
+                    results.append(item)
+        return results
+
     def get_file(self, file_id: str) -> CanvasFile:
         item, _ = self._request(f"/api/v1/files/{urllib.parse.quote(str(file_id))}")
         if not isinstance(item, dict):
@@ -322,4 +407,3 @@ def strip_html(value: str) -> str:
     value = re.sub(r"<[^>]+>", " ", value)
     value = html.unescape(value)
     return re.sub(r"[ \t\r\f\v]+", " ", value).strip()
-

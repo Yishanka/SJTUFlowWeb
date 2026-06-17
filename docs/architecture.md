@@ -74,8 +74,10 @@ apps/frontend/
 | GET | `/api/transcripts` | 列出 transcript 标题和说明 |
 | GET | `/api/transcripts/{id}` | 按需读取完整 transcript |
 | POST | `/api/media/canvas-access-hint` | 说明 Canvas external_tools 媒体页的登录态要求 |
-| POST | `/api/media/find-canvas-pages` | 用托管浏览器在课程页/模块页中收集 external_tools 候选 |
-| POST | `/api/media/resolve-canvas-page` | 用 SJTUFlow 托管浏览器 profile 进入 Canvas 页面并解析脱敏流候选 |
+| POST | `/api/media/ensure-canvas-login` | 打开可见托管浏览器准备/刷新 Canvas 登录态 |
+| POST | `/api/media/find-canvas-pages` | 调试兜底：用托管浏览器在课程页/模块页中收集 external_tools 候选 |
+| POST | `/api/media/resolve-canvas-page` | 兼容/调试：复用 SJTUFlow 托管浏览器 profile 进入 Canvas 页面并解析脱敏流候选 |
+| POST | `/api/media/plan-canvas-request` | 从自然语言或 URL 规划 Canvas 录播转写，返回脱敏课程/视频/流选择依据 |
 | POST | `/api/media/resolve-stream` | 调试兜底：从 HTML 片段/本地 HTML/媒体 URL 解析脱敏流候选 |
 | POST | `/api/media/probe` | 读取本地媒体元数据 |
 | POST | `/api/media/extract-audio` | 从本地媒体提取音频 |
@@ -83,6 +85,7 @@ apps/frontend/
 | POST | `/api/media/transcribe-and-save` | 本地媒体转写并默认保存 transcript |
 | POST | `/api/media/transcribe-stream` | 已授权媒体流转写并默认保存 transcript |
 | POST | `/api/media/transcribe-canvas-page` | 用托管浏览器解析 Canvas 页面并转写保存 transcript |
+| POST | `/api/media/transcribe-canvas-request` | 从自然语言或 URL 自动定位课程录播并转写保存 |
 | POST | `/api/media/transcribe-source` | 调试兜底：解析来源并转写保存 transcript |
 | POST | `/api/media/save-transcript` | 保存 transcript JSON/Markdown |
 | GET | `/api/jobs` | 列出后台任务 |
@@ -138,7 +141,8 @@ Transcript：
 - `transcripts.list` 和 Web `/api/transcripts` 只返回 `id/title/description/path/source/duration`。
 - 模型需要全文时调用 `transcripts.read`。
 - 转写结果保存为 JSON 和 Markdown，默认在 `~/SJTUFlowData/transcripts/`。
-- 媒体流转写不保存视频本体，只保留 transcript；Canvas `external_tools` 媒体页使用 SJTUFlow 托管浏览器 profile 取得登录态并解析流媒体。后端不读取用户日常浏览器 cookie；对外展示时必须脱敏签名 URL，且不能暴露 Cookie/request headers。
+- 媒体流转写不保存视频本体，只保留 transcript；Canvas 录播自然语言主流程通过 `media.transcribe_canvas_request` 接收课程/日期/主题描述，使用 Canvas token 定位课程，使用 SJTUFlow 保存的 Canvas 登录 state 启动 SJTU 课程视频 LTI `external_tools/9487`，调用 `courses.sjtu.edu.cn` VOD API 获取回放列表和流地址。后端不读取用户日常浏览器 cookie；对外展示和 LLM 选择时必须脱敏签名 URL，且不能暴露 Cookie/request headers。
+- 单个课程存在多个回放/流候选时，后端先让 LLM 基于脱敏候选元数据选择；未配置真实模型时使用确定性启发式选择。显式 Canvas URL 调试路径仍可用 browser network 捕获 `.m3u8` / `.mp4`。
 
 ## 数据目录
 

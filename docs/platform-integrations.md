@@ -90,8 +90,11 @@ transcripts.save_text
 
 ```text
 media.canvas_access_hint
+media.ensure_canvas_login
+media.check_canvas_login
 media.find_canvas_pages
 media.resolve_canvas_page
+media.plan_canvas_request
 media.resolve_stream
 media.probe
 media.extract_audio
@@ -99,6 +102,7 @@ media.transcribe
 media.transcribe_and_save
 media.transcribe_stream
 media.transcribe_canvas_page
+media.transcribe_canvas_request
 media.transcribe_source
 media.save_transcript
 ```
@@ -117,11 +121,13 @@ local video/audio
 SJTU Canvas external_tools 流媒体流水线：
 
 ```text
-Canvas external_tools page
-  <- optional: canvas.list_courses + media.find_canvas_pages finds candidate pages
-  -> SJTUFlow opens its managed local browser profile
-  -> user logs in to Canvas in that browser profile when needed
-  -> backend observes DOM/network media candidates
+natural language request
+  -> Canvas token lists courses
+  -> LLM/heuristic selection chooses course
+  -> backend checks SJTUFlow saved Canvas login state
+  -> backend launches SJTU lecture-video LTI external_tools/9487
+  -> backend calls courses.sjtu.edu.cn VOD API
+  -> LLM/heuristic selection chooses recording(s) and stream(s)
   -> backend ffmpeg streams temporary audio
   -> ASR transcription
   -> transcript JSON + Markdown
@@ -131,10 +137,12 @@ Canvas external_tools page
 要求：
 
 - 只处理用户提供或已授权访问的媒体文件。
-- Canvas API token 通常不能直接获取 `https://oc.sjtu.edu.cn/courses/<id>/external_tools/<id>` 中的媒体流；需要浏览器登录态。
-- 主流程使用 SJTUFlow 托管的本地浏览器 profile。用户第一次在该窗口登录 Canvas 后，后端复用这个 profile 自动进入课程视频页并解析媒体流。
+- Canvas API token 通常不能直接获取 SJTU 课程视频媒体流；自然语言主流程使用 Canvas token 选课，使用已保存的 SJTUFlow Canvas 登录 state 启动 `external_tools/9487` LTI，再调用 `courses.sjtu.edu.cn` VOD API 获取回放和流。
+- SJTUFlow 托管的本地浏览器 profile 只用于准备登录态并导出 `canvas-storage-state.json`；登录准备是可见窗口，后续 VOD API 和 ffmpeg 流读取使用该 state。
 - 后端不读取用户日常浏览器 profile 的 cookie，也不要求用户复制系统浏览器登录态。
-- `media.find_canvas_pages` 可从课程主页/模块页收集 external_tools 候选，帮助 agent 在用户只给课程名时定位视频页面；候选不唯一时必须让用户确认。
+- 用户主流程是 `media.plan_canvas_request` / `media.transcribe_canvas_request`：输入自然语言课程描述、日期/主题问题时，后端用 Canvas token 定位课程，再通过 SJTU LTI/VOD 获取回放列表并选择视频；显式 Canvas external_tools URL 仅作为兼容/调试路径。
+- `media.find_canvas_pages` 是开发/调试兜底工具；`media.resolve_canvas_page` 解析单页媒体候选。前端不再拆成“找 URL”和“转写 URL”两个入口。
+- LLM 只接收脱敏候选元数据和索引；签名 stream URL、Cookie、request headers 不暴露给模型或前端。
 - Agent 回复相关问题时必须说明登录态要求，不能暗示可以绕过认证、验证码、DRM 或课程权限。
 - `media.resolve_canvas_page` 可以解析托管浏览器页面中的 `<video src>`、`.mp4`、`.m3u8`、network resource；返回结果必须脱敏 `key`、`token` 等签名查询参数，且不能暴露 Cookie/request headers。
 - `media.resolve_stream` 仅作为调试兜底，用于直接媒体 URL 或本地 HTML 片段/文件；不作为用户主流程。

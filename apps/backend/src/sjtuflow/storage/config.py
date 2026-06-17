@@ -53,6 +53,16 @@ class AgentConfig:
 
 
 @dataclass
+class ASRConfig:
+    model: str = "base"
+    model_path: str = ""
+    download_root: str = ""
+    local_files_only: bool = False
+    device: str = "cpu"
+    compute_type: str = "int8"
+
+
+@dataclass
 class PermissionsConfig:
     confirm_local_write: bool = True
     confirm_external_write: bool = True
@@ -67,6 +77,7 @@ class Config:
     canvas: CanvasConfig = field(default_factory=CanvasConfig)
     workspace: WorkspaceConfig = field(default_factory=WorkspaceConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
+    asr: ASRConfig = field(default_factory=ASRConfig)
     permissions: PermissionsConfig = field(default_factory=PermissionsConfig)
 
 
@@ -104,6 +115,7 @@ def load_config(path: Path | None = None) -> Config:
         canvas=_dataclass_from(CanvasConfig, _section(raw, "canvas")),
         workspace=_dataclass_from(WorkspaceConfig, _section(raw, "workspace")),
         agent=_dataclass_from(AgentConfig, _section(raw, "agent")),
+        asr=_dataclass_from(ASRConfig, _section(raw, "asr")),
         permissions=_dataclass_from(PermissionsConfig, _section(raw, "permissions")),
     )
 
@@ -144,6 +156,16 @@ briefing_window_days = 14
 max_tool_calls = 12
 max_tool_result_chars = 16000
 
+[asr]
+# Local transcription uses faster-whisper. When model_path is empty, model is
+# resolved through the Hugging Face cache/download flow.
+model = "base"
+model_path = ""
+download_root = ""
+local_files_only = false
+device = "cpu"
+compute_type = "int8"
+
 [permissions]
 confirm_local_write = true
 confirm_external_write = true
@@ -178,6 +200,7 @@ def config_to_toml(config: Config, *, reveal_secrets: bool = False) -> str:
         "canvas": config.canvas.__dict__.copy(),
         "workspace": config.workspace.__dict__.copy(),
         "agent": config.agent.__dict__.copy(),
+        "asr": config.asr.__dict__.copy(),
         "permissions": config.permissions.__dict__.copy(),
     }
     if not reveal_secrets:

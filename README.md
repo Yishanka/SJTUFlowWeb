@@ -31,17 +31,85 @@ http://127.0.0.1:8765
 3. 进入首页查看 startup briefing。
 4. 在工作区对话，例如“这周有哪些作业？”。
 5. 在侧栏管理 Skills 和 Transcripts。
-6. 转写本地视频或 Canvas 课程视频页面，并默认保存 transcript 到资料库。
+6. 转写本地视频，或用自然语言/Canvas URL 定位 Canvas 课程录播并保存 transcript 到资料库。
 
 Canvas 课程视频的推荐流程：
 
-1. 在对话中提供 Canvas 课程视频页面 URL，例如 `https://oc.sjtu.edu.cn/courses/.../external_tools/...`。
-2. SJTUFlow 会打开自己管理的本地浏览器 profile。
-3. 第一次使用时，你需要在这个 SJTUFlow 浏览器窗口里登录 Canvas；之后后端会复用该本地 profile。
-4. 后端从页面/网络请求中解析视频流，流式转写并保存 transcript。
-5. 视频本体不会保存到本地，只保存 transcript。
+1. 进入“媒体转写”页面，先点“准备 Canvas 登录态”，在 SJTUFlow 托管浏览器里登录一次 Canvas。
+2. 在 Canvas 录播输入框里写自然语言，例如“今天算法设计课程老师是否提到签到？”；也可以直接粘贴 `https://oc.sjtu.edu.cn/courses/.../external_tools/...` 作为调试/兼容路径。
+3. 自然语言路径会先用 Canvas token 匹配课程，然后通过 SJTU 课程视频 LTI 工具 `external_tools/9487` 获取该课程 VOD 回放列表；LLM 只负责从脱敏的视频元数据中选择。
+4. 转写任务开始时会先短暂检查该 profile 是否已登录；如果未登录，会直接提示你重新准备登录态，不会反复弹登录窗口。
+5. 选中视频后，后端通过 SJTU VOD API 取得授权流地址并交给 ffmpeg；显式 URL 调试路径才会无头打开页面抓流。
+6. 后端流式转写并保存 transcript。视频本体不会保存到本地。
 
 注意：你平时使用的 Chrome/Safari 已登录 Canvas，不代表本地后端能直接读取那个浏览器的 cookie。SJTUFlow 不读取你的日常浏览器 profile，也不绕过登录、验证码、DRM 或课程权限。
+模型只会看到脱敏后的课程/视频/媒体候选信息；签名媒体 URL、Cookie 和请求头不会发给模型或显示在前端。
+
+## 本地转写模型
+
+本地媒体转写使用 `faster-whisper`，默认 ASR 模型是 `base`。第一次转写时，如果本机 Hugging Face cache 里没有 `Systran/faster-whisper-base`，后端会尝试从 Hugging Face 下载；如果当前机器不能解析或访问 `huggingface.co`，转写会失败，需要先修网络/DNS，或把模型放到本地后在配置里指定。
+
+可选配置在 `~/.sjtuflow/config.toml`：
+
+```toml
+[asr]
+model = "base"
+model_path = ""          # 本地 faster-whisper/CTranslate2 模型目录；填写后不走下载
+download_root = ""       # 可选 Hugging Face cache 目录
+local_files_only = false # true 表示只用本地缓存/本地路径
+device = "cpu"
+compute_type = "int8"
+```
+
+推荐把模型下载成一个普通本地目录，然后在前端“本地设置 → 本地转写模型 → 本地模型目录”里填写该目录：
+
+```bash
+mkdir -p /home/projects/SJTUFlowWeb/models/faster-whisper-base
+
+uv run python - <<'PY'
+from huggingface_hub import snapshot_download
+
+snapshot_download(
+    repo_id="Systran/faster-whisper-base",
+    local_dir="/home/projects/SJTUFlowWeb/models/faster-whisper-base",
+    allow_patterns=[
+        "config.json",
+        "preprocessor_config.json",
+        "model.bin",
+        "tokenizer.json",
+        "vocabulary.*",
+    ],
+)
+PY
+```
+
+如果当前网络访问 Hugging Face 不稳定，可以使用镜像：
+
+```bash
+HF_ENDPOINT=https://hf-mirror.com uv run python - <<'PY'
+from huggingface_hub import snapshot_download
+
+snapshot_download(
+    repo_id="Systran/faster-whisper-base",
+    local_dir="/home/projects/SJTUFlowWeb/models/faster-whisper-base",
+    allow_patterns=[
+        "config.json",
+        "preprocessor_config.json",
+        "model.bin",
+        "tokenizer.json",
+        "vocabulary.*",
+    ],
+)
+PY
+```
+
+下载完成后，在前端填入：
+
+```text
+/home/projects/SJTUFlowWeb/models/faster-whisper-base
+```
+
+如果这台机器完全不能联网，也可以在另一台机器下载同一个目录后拷贝过来。目录里至少应包含 `model.bin`、`config.json`、`tokenizer.json`、`preprocessor_config.json` 和 `vocabulary.*`。
 
 Skills 分两类：
 
@@ -77,7 +145,7 @@ Transcripts 默认保存在 `~/SJTUFlowData/transcripts/`。
 - Canvas 读取与文件下载工具。
 - Skill metadata-first 加载。
 - Transcript metadata-first 加载与文本保存。
-- 后端媒体工具：本地媒体转写、Canvas 托管浏览器会话解析媒体流、transcript 默认入库。
+- 后端媒体工具：本地媒体转写、Canvas 自然语言定位录播、托管浏览器会话解析媒体流、transcript 默认入库。
 - 静态前端 MVP：控制面板、学习对话、Skills、Transcripts、媒体转写和本地设置。
 - CLI 作为开发和备用入口。
 
