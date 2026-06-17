@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "echo \"Frontend is a placeholder. Implement the local UI here.\"",
-    "build": "echo \"Frontend build is not implemented yet.\""
+    "dev": "python3 -m http.server 5173 -d .",
+    "build": "mkdir -p dist && cp index.html app.js styles.css dist/ && rm -rf dist/assets && cp -R assets dist/assets"
   }
 }
