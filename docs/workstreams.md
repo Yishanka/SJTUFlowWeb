@@ -56,13 +56,16 @@
 
 ```text
 media.canvas_access_hint(url: str)
-media.resolve_stream(source: str)
+media.find_canvas_pages(course_id: str, query: str = "", wait_seconds: int = 20)
+media.resolve_canvas_page(url: str, wait_seconds: int = 45)
+media.resolve_stream(source: str)  # debug fallback
 media.probe(path: str)
 media.extract_audio(path: str, out_dir: str | None = None)
 media.transcribe(path: str, provider: str = "local-whisper", language: str | None = None)
 media.transcribe_and_save(path: str, title: str | None = None, provider: str = "local-whisper", language: str | None = None)
 media.transcribe_stream(stream_url: str, title: str, provider: str = "local-whisper", language: str | None = None)
-media.transcribe_source(source: str, title: str, provider: str = "local-whisper", language: str | None = None)
+media.transcribe_canvas_page(url: str, title: str, provider: str = "local-whisper", language: str | None = None)
+media.transcribe_source(source: str, title: str, provider: str = "local-whisper", language: str | None = None)  # debug fallback
 media.save_transcript(title: str, content: str, source: str = "", description: str = "")
 ```
 
@@ -70,12 +73,15 @@ media.save_transcript(title: str, content: str, source: str = "", description: s
 
 ```text
 POST /api/media/canvas-access-hint
+POST /api/media/find-canvas-pages
+POST /api/media/resolve-canvas-page
 POST /api/media/resolve-stream
 POST /api/media/probe
 POST /api/media/extract-audio
 POST /api/media/transcribe
 POST /api/media/transcribe-and-save
 POST /api/media/transcribe-stream
+POST /api/media/transcribe-canvas-page
 POST /api/media/transcribe-source
 POST /api/media/save-transcript
 GET  /api/jobs/{job_id}
@@ -84,8 +90,11 @@ GET  /api/jobs/{job_id}
 实现要求：
 
 - 优先处理用户主动提供的本地文件。
-- SJTU Canvas `external_tools` 媒体页通常不能只靠 Canvas token 抓取；需要用户在浏览器里保持登录态，由前端或用户提供已授权的媒体 stream URL、已登录 HTML 片段/文件，或同源请求头。
-- 后端可用 `media.resolve_stream` 从 `<video src="...">` 片段、本地 HTML 文件或直接媒体 URL 中解析候选流；返回给 agent/API 时必须脱敏签名参数。
+- SJTU Canvas `external_tools` 媒体页通常不能只靠 Canvas token 抓取；主流程是使用 SJTUFlow 托管的本地浏览器 profile 打开页面。第一次使用时用户需要在该浏览器窗口里登录 Canvas，后续后端复用这个 profile。
+- 不读取用户日常 Chrome/Safari/Edge profile 的 cookie；不要设计成偷取或复制系统浏览器登录态。
+- 后端用 `media.resolve_canvas_page` 从托管浏览器页面、DOM、network resource 中解析候选流；返回给 agent/API 时必须脱敏签名参数，不暴露 Cookie/request headers。
+- 如果用户只给课程名/日期，agent 可先用 `canvas.list_courses` 匹配 `course_id`，再用 `media.find_canvas_pages` 从课程主页/模块页收集 external_tools 候选。候选不唯一时需要用户确认，不能盲目转写第一个链接。
+- `media.resolve_stream` / `media.transcribe_source` 仅作为调试兜底，支持直接媒体 URL 或本地 HTML 片段/文件；不要把“复制 HTML”作为用户主流程。
 - 模型回复时要明确说明这个限制，不要暗示可以绕过认证。
 - 不绕过视频平台 DRM、验证码或权限限制。
 - 大文件/转写走 job 状态，不阻塞 HTTP 请求。
@@ -99,8 +108,9 @@ GET  /api/jobs/{job_id}
 1. 用户问“今天 xxx 课程中老师是否提到有签到？”。
 2. Agent 先调用 `transcripts.list` 查本地资料库是否已有今天该课程的 transcript。
 3. 如果已有，按需 `transcripts.read` 读取全文并回答。
-4. 如果没有，agent 使用 `lecture-signin-check` skill：若用户只给 Canvas external_tools URL，先说明需要浏览器登录态；若用户提供已登录页面 HTML 片段/文件或授权媒体 URL，则调用 `media.resolve_stream`。
-5. 后端调用 `POST /api/media/transcribe-source` 或 `media.transcribe_source`，解析来源、用 ffmpeg 流式抽取临时音频，转写完成后默认保存 transcript 到 `~/SJTUFlowData/transcripts/`。
+4. 如果没有，agent 使用 `lecture-signin-check` skill：若用户只给课程名，先 `canvas.list_courses` 匹配课程，再 `media.find_canvas_pages` 找课程里的 external_tools 视频候选；候选不唯一时请用户确认。
+5. 拿到 Canvas external_tools URL 后调用 `media.resolve_canvas_page`。若返回需要登录，提示用户在 SJTUFlow 打开的浏览器窗口完成 Canvas 登录后重试。
+6. 解析到媒体流后，后端调用 `POST /api/media/transcribe-canvas-page` 或 `media.transcribe_canvas_page`，用 ffmpeg 流式抽取临时音频，转写完成后默认保存 transcript 到 `~/SJTUFlowData/transcripts/`。
 7. Agent 再按 metadata-first 规则读取新 transcript，回答是否提到签到，并指出来源 transcript。
 
 本地视频模式：

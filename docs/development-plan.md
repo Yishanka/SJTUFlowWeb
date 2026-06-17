@@ -60,17 +60,22 @@
 
 - 后端 media 工具：
   - `media.canvas_access_hint`
+  - `media.find_canvas_pages`
+  - `media.resolve_canvas_page`
   - `media.resolve_stream`
   - `media.probe`
   - `media.extract_audio`
   - `media.transcribe`
   - `media.transcribe_and_save`
   - `media.transcribe_stream`
+  - `media.transcribe_canvas_page`
   - `media.transcribe_source`
   - `media.save_transcript`
 - 支持上传本地媒体文件或填写本地路径。
-- 支持从用户提供的已登录 HTML 片段/本地 HTML 文件/直接媒体 URL 解析媒体流；后续前端可从 SJTU Canvas `external_tools` 登录态页面转交这些内容。
-- Canvas token 通常不能直接获取 external_tools 媒体流；必须记录并在模型回复中说明浏览器登录态要求。
+- 支持使用 SJTUFlow 托管的本地浏览器 profile 进入 SJTU Canvas `external_tools` 页面并解析媒体流；用户第一次需要在该窗口登录 Canvas，后续复用本地 profile。
+- 支持在用户只给课程名/日期时，先用 Canvas course_id 搜索课程主页/模块页中的 external_tools 候选；候选不唯一时必须确认。
+- Canvas token 通常不能直接获取 external_tools 媒体流；必须记录并在模型回复中说明托管浏览器登录态要求。
+- 不读取用户日常浏览器 profile 的 cookie；直接媒体 URL / 本地 HTML 解析仅作为 debug fallback。
 - 不绕过平台权限、验证码或 DRM。
 - 视频本体不保存到本地；只允许转写期间的临时音频缓存，任务结束后清理。
 - transcript 输出 Markdown 和 JSON 两种格式。
@@ -81,7 +86,7 @@
 交付标准：
 
 - 小视频/音频可以生成带时间戳 transcript。
-- 已授权媒体流可以转成 transcript，并且不保存视频本体。
+- Canvas 托管浏览器会话解析到的已授权媒体流可以转成 transcript，并且不保存视频本体。
 - transcript 列表不会预加载全文。
 
 ## 阶段 4：更多 Skills

@@ -22,12 +22,12 @@ uv run sjtuflow web
 - Canvas MVP：课程、作业、公告、文件列表、文件下载。
 - Skill MVP：只预加载标题和说明，按需通过 `skills.read` 读取全文。
 - Transcript MVP：只预加载标题和说明，按需通过 `transcripts.read` 读取全文，可保存文本 transcript。
-- Media MVP：后端支持本地媒体转写、已授权媒体流转写，transcript 默认保存到资料库，视频本体不保存。
+- Media MVP：后端支持本地媒体转写、Canvas 托管浏览器会话解析媒体流并转写，transcript 默认保存到资料库，视频本体不保存。
 
 尚未完成的产品能力：
 
 - 完整前端 UI。
-- 前端媒体入口：本地文件选择、Canvas `external_tools` 登录态页面解析、任务进度展示。
+- 前端媒体入口：本地文件选择、Canvas 托管浏览器登录引导、任务进度展示。
 - 邮箱连接器。
 - 文档抽取、检索索引和课程问答。
 - 可视化权限确认队列。
@@ -58,7 +58,7 @@ uv run sjtuflow web
 - “这周有哪些作业和截止时间？”
 - “展开这门课最近的公告，并告诉我需要做什么。”
 - “把这个视频转成 transcript，保存到资料库。”
-- “我已打开 Canvas 课程视频页面，帮我转成 transcript 后回答是否提到签到。”
+- “这是 Canvas 课程视频页面 URL，帮我转成 transcript 后回答是否提到签到。”
 - “读取上周算法课 transcript，整理老师提到的考点。”
 - “根据 Canvas 公告和本地 transcript 生成周报。”
 - “把这套周报流程保存成一个 skill。”
@@ -92,7 +92,7 @@ uv run sjtuflow web
 - 不做多用户 SaaS 或远端账号系统。
 - 不建立中央数据库；默认使用本地配置、资料目录、缓存和审计日志。
 - 不绕过学校平台的登录、验证码、DRM 或权限限制。
-- 不承诺 Canvas token 能获取 `external_tools` 媒体流；这类页面需要用户浏览器登录态。
+- 不承诺 Canvas token 能获取 `external_tools` 媒体流；这类页面需要浏览器登录态。SJTUFlow 使用自己托管的本地浏览器 profile，不读取用户日常浏览器 cookie。
 - 不自动提交作业、发送邮件、删除文件或修改远端内容。
 - 不在启动时全量同步所有课程资料。
 

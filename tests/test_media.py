@@ -23,9 +23,13 @@ from sjtuflow.tools.media import (
     TranscriptResult,
     TranscriptSegment,
     canvas_media_access_hint,
+    find_canvas_media_pages,
     probe_media,
+    resolve_canvas_page_media,
     resolve_media_stream,
     save_transcript,
+    safe_resolution_payload,
+    transcribe_canvas_page_media,
     transcribe_media,
     transcribe_media_and_save,
     transcribe_resolved_media_source,
@@ -161,6 +165,148 @@ def test_resolve_canvas_external_tool_requires_browser_session(tmp_path):
     assert resolved["candidates"] == []
 
 
+def test_resolve_canvas_page_media_uses_managed_browser_capture(tmp_path, monkeypatch):
+    app = _app(tmp_path)
+
+    def fake_capture(app, url, *, wait_seconds=45, headless=False):
+        return {
+            "url": url,
+            "final_url": url,
+            "html": '<video src="/vod/course/fallback.mp4?key=html-secret"></video>',
+            "network_urls": ["https://live.sjtu.edu.cn/vod/course/clip.mp4?key=network-secret"],
+            "cookies": [
+                {
+                    "name": "session",
+                    "value": "cookie-secret",
+                    "domain": ".sjtu.edu.cn",
+                    "path": "/",
+                }
+            ],
+            "user_agent": "TestBrowser/1.0",
+            "profile_dir": str(tmp_path / "state" / "browser" / "canvas"),
+            "login_required": False,
+        }
+
+    monkeypatch.setattr(media_mod, "_capture_browser_media_page", fake_capture)
+
+    resolved = resolve_canvas_page_media(app, "https://oc.sjtu.edu.cn/courses/123/external_tools/456")
+
+    assert resolved["status"] == "resolved"
+    assert resolved["stream_url"] == "https://live.sjtu.edu.cn/vod/course/clip.mp4?key=network-secret"
+    assert resolved["display_url"] == "https://live.sjtu.edu.cn/vod/course/clip.mp4?***"
+    assert resolved["browser_session"] == "sjtuflow-managed"
+    assert resolved["request_headers"]["Cookie"] == "session=cookie-secret"
+    assert resolved["request_headers"]["Referer"] == "https://oc.sjtu.edu.cn/courses/123/external_tools/456"
+
+
+def test_safe_canvas_page_payload_hides_stream_and_headers(tmp_path, monkeypatch):
+    app = _app(tmp_path)
+
+    def fake_capture(app, url, *, wait_seconds=45, headless=False):
+        return {
+            "url": url,
+            "final_url": url,
+            "html": "",
+            "network_urls": ["https://live.sjtu.edu.cn/vod/course/clip.mp4?key=secret"],
+            "cookies": [{"name": "session", "value": "cookie-secret", "domain": ".sjtu.edu.cn", "path": "/"}],
+            "user_agent": "TestBrowser/1.0",
+            "profile_dir": str(tmp_path / "state" / "browser" / "canvas"),
+            "login_required": False,
+        }
+
+    monkeypatch.setattr(media_mod, "_capture_browser_media_page", fake_capture)
+
+    safe = safe_resolution_payload(
+        resolve_canvas_page_media(app, "https://oc.sjtu.edu.cn/courses/123/external_tools/456")
+    )
+    payload = json.dumps(safe, ensure_ascii=False)
+
+    assert "key=secret" not in payload
+    assert "cookie-secret" not in payload
+    assert "request_headers" not in safe
+    assert safe["stream_url_available"] is True
+    assert safe["display_url"].endswith("?***")
+
+
+def test_resolve_canvas_page_media_login_required(tmp_path, monkeypatch):
+    app = _app(tmp_path)
+
+    def fake_capture(app, url, *, wait_seconds=45, headless=False):
+        return {
+            "url": url,
+            "final_url": "https://jaccount.sjtu.edu.cn/login",
+            "html": "<form><input type='password'></form>",
+            "network_urls": [],
+            "cookies": [],
+            "user_agent": "TestBrowser/1.0",
+            "profile_dir": str(tmp_path / "state" / "browser" / "canvas"),
+            "login_required": True,
+        }
+
+    monkeypatch.setattr(media_mod, "_capture_browser_media_page", fake_capture)
+
+    resolved = resolve_canvas_page_media(app, "https://oc.sjtu.edu.cn/courses/123/external_tools/456")
+
+    assert resolved["status"] == "requires_browser_login"
+    assert resolved["requires_browser_login"] is True
+    assert resolved["stream_url"] == ""
+
+
+def test_find_canvas_media_pages_collects_external_tool_candidates(tmp_path, monkeypatch):
+    app = _app(tmp_path)
+
+    def fake_capture(app, url, *, wait_seconds=20, headless=False):
+        if url.endswith("/modules"):
+            html = """
+            <a href="/courses/123/external_tools/456?launch=secret" title="今日课堂回放">
+              算法课 6月17日 签到
+            </a>
+            <a href="/courses/123/external_tools/789">作业系统</a>
+            """
+        else:
+            html = '<a href="/courses/123/external_tools/111">课程视频入口</a>'
+        return {
+            "url": url,
+            "final_url": url,
+            "html": html,
+            "title": "Course",
+            "profile_dir": str(tmp_path / "state" / "browser" / "canvas"),
+            "login_required": False,
+        }
+
+    monkeypatch.setattr(media_mod, "_capture_browser_html_page", fake_capture)
+
+    found = find_canvas_media_pages(app, "123", query="算法 签到")
+
+    assert found["status"] == "found"
+    assert found["requires_browser_login"] is False
+    assert found["candidates"][0]["url"] == "https://oc.sjtu.edu.cn/courses/123/external_tools/456"
+    assert "launch=secret" not in json.dumps(found, ensure_ascii=False)
+    assert found["candidates"][0]["score"] == 2
+
+
+def test_find_canvas_media_pages_login_required(tmp_path, monkeypatch):
+    app = _app(tmp_path)
+
+    def fake_capture(app, url, *, wait_seconds=20, headless=False):
+        return {
+            "url": url,
+            "final_url": "https://jaccount.sjtu.edu.cn/login",
+            "html": "<input type='password'>",
+            "title": "Login",
+            "profile_dir": str(tmp_path / "state" / "browser" / "canvas"),
+            "login_required": True,
+        }
+
+    monkeypatch.setattr(media_mod, "_capture_browser_html_page", fake_capture)
+
+    found = find_canvas_media_pages(app, "123")
+
+    assert found["status"] == "requires_browser_login"
+    assert found["requires_browser_login"] is True
+    assert found["candidates"] == []
+
+
 # --------------------------------------------------------------------------- #
 # transcribe
 # --------------------------------------------------------------------------- #
@@ -285,6 +431,66 @@ def test_transcribe_source_resolves_html_and_saves_transcript(tmp_path, monkeypa
     assert meta["resolved_media"]["candidate_count"] == 1
 
 
+def test_transcribe_canvas_page_resolves_and_saves_transcript(tmp_path, monkeypatch):
+    app = _app(tmp_path)
+    seen_commands: list[list[str]] = []
+
+    def fake_resolve(app, url, *, wait_seconds=45, headless=False):
+        return {
+            "status": "resolved",
+            "source": url,
+            "source_kind": "canvas_external_tool_page",
+            "stream_url": "https://live.sjtu.edu.cn/vod/course/clip.mp4?key=secret",
+            "display_url": "https://live.sjtu.edu.cn/vod/course/clip.mp4?***",
+            "candidates": [
+                {
+                    "stream_url": "https://live.sjtu.edu.cn/vod/course/clip.mp4?key=secret",
+                    "display_url": "https://live.sjtu.edu.cn/vod/course/clip.mp4?***",
+                    "source": "browser_network",
+                }
+            ],
+            "request_headers": {"Cookie": "session=cookie-secret", "Referer": "https://oc.sjtu.edu.cn/x"},
+            "requires_browser_login": False,
+            "browser_session": "sjtuflow-managed",
+            "final_url": "https://oc.sjtu.edu.cn/courses/123/external_tools/456",
+        }
+
+    def fake_run(cmd, *, timeout=1800):
+        seen_commands.append(cmd)
+        output = Path(cmd[-1])
+        output.write_bytes(b"\x00\x00")
+
+        class _Completed:
+            stdout = ""
+
+        return _Completed()
+
+    def fake_whisper(audio_path, language, model_size):
+        return TranscriptResult(
+            segments=[TranscriptSegment(0.0, 4.0, "今天提到了签到")],
+            language=language or "zh",
+            provider="local-whisper",
+        )
+
+    monkeypatch.setattr(media_mod, "resolve_canvas_page_media", fake_resolve)
+    monkeypatch.setattr(media_mod, "_run", fake_run)
+    monkeypatch.setattr(media_mod, "_transcribe_faster_whisper", fake_whisper)
+
+    meta = transcribe_canvas_page_media(
+        app,
+        "https://oc.sjtu.edu.cn/courses/123/external_tools/456",
+        "Canvas Lecture",
+        language="zh",
+    )
+
+    assert Path(meta["path"]).exists()
+    assert meta["source"] == "https://live.sjtu.edu.cn/vod/course/clip.mp4?***"
+    assert meta["resolved_media"]["browser_session"] == "sjtuflow-managed"
+    ffmpeg_cmd = seen_commands[0]
+    assert "-headers" in ffmpeg_cmd
+    assert "session=cookie-secret" in ffmpeg_cmd[ffmpeg_cmd.index("-headers") + 1]
+
+
 # --------------------------------------------------------------------------- #
 # save_transcript
 # --------------------------------------------------------------------------- #
@@ -370,12 +576,15 @@ def test_media_tools_registered():
     assert {
         "media.canvas_access_hint",
         "media.resolve_stream",
+        "media.find_canvas_pages",
+        "media.resolve_canvas_page",
         "media.probe",
         "media.extract_audio",
         "media.transcribe",
         "media.transcribe_and_save",
         "media.transcribe_stream",
         "media.transcribe_source",
+        "media.transcribe_canvas_page",
         "media.save_transcript",
     } <= names
 
@@ -413,7 +622,10 @@ def test_media_risk_levels():
     assert registry.get("media.transcribe_and_save").requires_confirmation is True
     assert registry.get("media.transcribe_stream").requires_confirmation is True
     assert registry.get("media.transcribe_source").requires_confirmation is True
+    assert registry.get("media.transcribe_canvas_page").requires_confirmation is True
     assert registry.get("media.resolve_stream").risk_level == "read"
+    assert registry.get("media.find_canvas_pages").risk_level == "read"
+    assert registry.get("media.resolve_canvas_page").risk_level == "read"
     assert registry.get("media.probe").risk_level == "read"
     assert registry.get("media.transcribe").risk_level == "read"
 
@@ -552,3 +764,66 @@ def test_service_resolve_stream_from_html(tmp_path, monkeypatch):
     assert "stream_url" not in resolved
     assert resolved["stream_url_available"] is True
     assert resolved["display_url"].endswith("?***")
+
+
+def test_service_resolve_canvas_page_redacts_result(tmp_path, monkeypatch):
+    monkeypatch.setenv("SJTU_FLOW_CONFIG", str(tmp_path / "config.toml"))
+    service = LocalAppService(cwd=tmp_path)
+    service.update_config(
+        {
+            "workspace.state_dir": str(tmp_path / "state"),
+            "workspace.data_dir": str(tmp_path / "data"),
+        }
+    )
+
+    def fake_capture(app, url, *, wait_seconds=45, headless=False):
+        return {
+            "url": url,
+            "final_url": url,
+            "html": "",
+            "network_urls": ["https://live.sjtu.edu.cn/vod/course/clip.mp4?key=secret"],
+            "cookies": [{"name": "session", "value": "cookie-secret", "domain": ".sjtu.edu.cn", "path": "/"}],
+            "user_agent": "TestBrowser/1.0",
+            "profile_dir": str(tmp_path / "state" / "browser" / "canvas"),
+            "login_required": False,
+        }
+
+    monkeypatch.setattr(media_mod, "_capture_browser_media_page", fake_capture)
+
+    resolved = service.media_resolve_canvas_page("https://oc.sjtu.edu.cn/courses/123/external_tools/456")
+    payload = json.dumps(resolved, ensure_ascii=False)
+
+    assert resolved["status"] == "resolved"
+    assert "stream_url" not in resolved
+    assert "key=secret" not in payload
+    assert "cookie-secret" not in payload
+
+
+def test_service_find_canvas_pages(tmp_path, monkeypatch):
+    monkeypatch.setenv("SJTU_FLOW_CONFIG", str(tmp_path / "config.toml"))
+    service = LocalAppService(cwd=tmp_path)
+    service.update_config(
+        {
+            "workspace.state_dir": str(tmp_path / "state"),
+            "workspace.data_dir": str(tmp_path / "data"),
+        }
+    )
+
+    def fake_capture(app, url, *, wait_seconds=20, headless=False):
+        return {
+            "url": url,
+            "final_url": url,
+            "html": '<a href="/courses/123/external_tools/456?token=secret">今日课堂回放</a>',
+            "title": "Course",
+            "profile_dir": str(tmp_path / "state" / "browser" / "canvas"),
+            "login_required": False,
+        }
+
+    monkeypatch.setattr(media_mod, "_capture_browser_html_page", fake_capture)
+
+    found = service.media_find_canvas_pages("123", query="课堂")
+    payload = json.dumps(found, ensure_ascii=False)
+
+    assert found["status"] == "found"
+    assert found["candidates"][0]["url"] == "https://oc.sjtu.edu.cn/courses/123/external_tools/456"
+    assert "token=secret" not in payload

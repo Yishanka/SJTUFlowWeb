@@ -307,6 +307,36 @@ class LocalAppService:
 
         return safe_resolution_payload(resolve_media_stream(self.app_context(), source, request_headers=request_headers))
 
+    def media_resolve_canvas_page(
+        self,
+        url: str,
+        *,
+        wait_seconds: int = 45,
+    ) -> dict[str, Any]:
+        from sjtuflow.tools.media import resolve_canvas_page_media, safe_resolution_payload
+
+        return safe_resolution_payload(
+            resolve_canvas_page_media(self.app_context(), url, wait_seconds=wait_seconds)
+        )
+
+    def media_find_canvas_pages(
+        self,
+        course_id: str,
+        *,
+        query: str = "",
+        wait_seconds: int = 20,
+        max_candidates: int = 20,
+    ) -> dict[str, Any]:
+        from sjtuflow.tools.media import find_canvas_media_pages
+
+        return find_canvas_media_pages(
+            self.app_context(),
+            course_id,
+            query=query,
+            wait_seconds=wait_seconds,
+            max_candidates=max_candidates,
+        )
+
     def media_transcribe_stream(
         self,
         stream_url: str,
@@ -372,6 +402,39 @@ class LocalAppService:
 
         runner = self.jobs.run_sync if sync else self.jobs.submit
         return runner("media.transcribe_source", worker)
+
+    def media_transcribe_canvas_page(
+        self,
+        url: str,
+        title: str,
+        provider: str = "local-whisper",
+        language: str | None = None,
+        description: str = "",
+        *,
+        overwrite: bool = False,
+        wait_seconds: int = 45,
+        sync: bool = False,
+    ) -> dict[str, Any]:
+        from sjtuflow.tools.media import transcribe_canvas_page_media
+
+        def worker(handle: JobHandle) -> dict[str, Any]:
+            def progress(fraction: float, message: str) -> None:
+                handle.update(progress=fraction, message=message)
+
+            return transcribe_canvas_page_media(
+                self.app_context(),
+                url,
+                title,
+                provider=provider,
+                language=language,
+                description=description,
+                overwrite=overwrite,
+                wait_seconds=wait_seconds,
+                progress=progress,
+            )
+
+        runner = self.jobs.run_sync if sync else self.jobs.submit
+        return runner("media.transcribe_canvas_page", worker)
 
     def media_save_transcript(
         self,

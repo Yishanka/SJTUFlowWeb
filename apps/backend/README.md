@@ -13,3 +13,10 @@ uv run sjtuflow doctor
 uv run sjtuflow config
 uv run python apps/backend/main.py doctor
 ```
+
+Canvas media pages are resolved through a SJTUFlow-managed local browser
+profile under the state directory. Install the browser runtime once with:
+
+```bash
+uv run playwright install chromium
+```

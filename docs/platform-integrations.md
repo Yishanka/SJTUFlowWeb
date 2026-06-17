@@ -90,12 +90,15 @@ transcripts.save_text
 
 ```text
 media.canvas_access_hint
+media.find_canvas_pages
+media.resolve_canvas_page
 media.resolve_stream
 media.probe
 media.extract_audio
 media.transcribe
 media.transcribe_and_save
 media.transcribe_stream
+media.transcribe_canvas_page
 media.transcribe_source
 media.save_transcript
 ```
@@ -115,9 +118,10 @@ SJTU Canvas external_tools 流媒体流水线：
 
 ```text
 Canvas external_tools page
-  -> user keeps browser login session
-  -> frontend/user provides logged-in HTML snippet, authorized stream_url, or same-session headers
-  -> backend resolves <video src> / .mp4 / .m3u8 candidates
+  <- optional: canvas.list_courses + media.find_canvas_pages finds candidate pages
+  -> SJTUFlow opens its managed local browser profile
+  -> user logs in to Canvas in that browser profile when needed
+  -> backend observes DOM/network media candidates
   -> backend ffmpeg streams temporary audio
   -> ASR transcription
   -> transcript JSON + Markdown
@@ -128,8 +132,12 @@ Canvas external_tools page
 
 - 只处理用户提供或已授权访问的媒体文件。
 - Canvas API token 通常不能直接获取 `https://oc.sjtu.edu.cn/courses/<id>/external_tools/<id>` 中的媒体流；需要浏览器登录态。
+- 主流程使用 SJTUFlow 托管的本地浏览器 profile。用户第一次在该窗口登录 Canvas 后，后端复用这个 profile 自动进入课程视频页并解析媒体流。
+- 后端不读取用户日常浏览器 profile 的 cookie，也不要求用户复制系统浏览器登录态。
+- `media.find_canvas_pages` 可从课程主页/模块页收集 external_tools 候选，帮助 agent 在用户只给课程名时定位视频页面；候选不唯一时必须让用户确认。
 - Agent 回复相关问题时必须说明登录态要求，不能暗示可以绕过认证、验证码、DRM 或课程权限。
-- `media.resolve_stream` 可以解析用户提供的已登录 HTML 片段/本地 HTML 文件/直接媒体 URL；返回结果必须脱敏 `key`、`token` 等签名查询参数。
+- `media.resolve_canvas_page` 可以解析托管浏览器页面中的 `<video src>`、`.mp4`、`.m3u8`、network resource；返回结果必须脱敏 `key`、`token` 等签名查询参数，且不能暴露 Cookie/request headers。
+- `media.resolve_stream` 仅作为调试兜底，用于直接媒体 URL 或本地 HTML 片段/文件；不作为用户主流程。
 - 视频本体不保存到本地；流媒体处理只允许临时音频缓存，任务结束后清理。
 - 大文件走 job 状态。
 - transcript 默认保存到 `~/SJTUFlowData/transcripts/`，demo 暂不提供“不保存”或资料管理入口。

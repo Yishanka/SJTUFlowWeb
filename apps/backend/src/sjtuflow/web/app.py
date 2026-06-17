@@ -48,6 +48,18 @@ class MediaResolveStreamRequest(BaseModel):
     request_headers: dict[str, str] | None = None
 
 
+class MediaResolveCanvasPageRequest(BaseModel):
+    url: str
+    wait_seconds: int = 45
+
+
+class MediaFindCanvasPagesRequest(BaseModel):
+    course_id: str
+    query: str = ""
+    wait_seconds: int = 20
+    max_candidates: int = 20
+
+
 class MediaExtractAudioRequest(BaseModel):
     path: str
     out_dir: str | None = None
@@ -91,6 +103,17 @@ class MediaTranscribeSourceRequest(BaseModel):
     overwrite: bool = False
     sync: bool = False
     request_headers: dict[str, str] | None = None
+
+
+class MediaTranscribeCanvasPageRequest(BaseModel):
+    url: str
+    title: str
+    provider: str = "local-whisper"
+    language: str | None = None
+    description: str = ""
+    overwrite: bool = False
+    wait_seconds: int = 45
+    sync: bool = False
 
 
 class MediaSaveTranscriptRequest(BaseModel):
@@ -215,6 +238,26 @@ def create_app(*, service: LocalAppService | None = None, frontend_dir: Path | N
             request_headers=request.request_headers,
         )
 
+    @app.post("/api/media/resolve-canvas-page")
+    async def media_resolve_canvas_page(request: MediaResolveCanvasPageRequest):
+        return await run_service(
+            app,
+            "media_resolve_canvas_page",
+            request.url,
+            wait_seconds=request.wait_seconds,
+        )
+
+    @app.post("/api/media/find-canvas-pages")
+    async def media_find_canvas_pages(request: MediaFindCanvasPagesRequest):
+        return await run_service(
+            app,
+            "media_find_canvas_pages",
+            request.course_id,
+            query=request.query,
+            wait_seconds=request.wait_seconds,
+            max_candidates=request.max_candidates,
+        )
+
     @app.post("/api/media/extract-audio")
     async def media_extract_audio(request: MediaExtractAudioRequest):
         return await run_service(
@@ -273,6 +316,21 @@ def create_app(*, service: LocalAppService | None = None, frontend_dir: Path | N
             request.description,
             overwrite=request.overwrite,
             request_headers=request.request_headers,
+            sync=request.sync,
+        )
+
+    @app.post("/api/media/transcribe-canvas-page")
+    async def media_transcribe_canvas_page(request: MediaTranscribeCanvasPageRequest):
+        return await run_service(
+            app,
+            "media_transcribe_canvas_page",
+            request.url,
+            request.title,
+            request.provider,
+            request.language,
+            request.description,
+            overwrite=request.overwrite,
+            wait_seconds=request.wait_seconds,
             sync=request.sync,
         )
 
