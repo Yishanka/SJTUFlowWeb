@@ -114,11 +114,12 @@ SJTUFlowWeb/
         builtin_skills/
           weekly-review/SKILL.md
     frontend/
-      public/
-      src/
+      assets/
+      app.js
+      index.html
+      styles.css
   docs/
   ~/.sjtuflow/skills/        # 用户通过前端创建，本地运行时目录
-  packages/
   pyproject.toml
   uv.lock
 ```
