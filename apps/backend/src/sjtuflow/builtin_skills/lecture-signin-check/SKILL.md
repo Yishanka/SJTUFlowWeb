@@ -16,6 +16,7 @@
 - `canvas.list_courses`
 - `canvas.list_modules`
 - `canvas.list_module_items`
+- `canvas.list_course_tabs`
 - `canvas.list_external_tool_module_items`
 - `canvas.read_external_tool_page`
 
@@ -31,10 +32,13 @@
 3. 签到记录路径：
    - 先调用 `canvas.connection_status(ping=true)` 确认 Canvas token 可用。
    - 调用 `canvas.list_courses` 找到目标课程；课程不唯一时让用户确认。
-   - 调用 `canvas.list_modules`、`canvas.list_module_items` 或 `canvas.list_external_tool_module_items` 查是否有签到、考勤、Attendance、Roll Call、external_tools 入口。
-   - 如果用户提供了 Canvas `external_tools` URL，或模块里找到明确签到/考勤 external tool，调用 `canvas.read_external_tool_page(url=<url>)`。
+   - 调用 `canvas.list_modules`、`canvas.list_module_items` 或 `canvas.list_external_tool_module_items` 查模块里的签到、考勤、Attendance、Roll Call、external_tools 入口。
+   - 即使模块为空，也继续调用 `canvas.list_course_tabs` 查课程左侧导航；很多签到/考勤入口是 course navigation LTI tab，不会出现在 modules / assignments。
+   - 如果用户提供了 Canvas `external_tools` URL，或模块/tabs 里找到明确签到/考勤 external tool，调用 `canvas.read_external_tool_page(url=<url>)`。
+   - 如果 `canvas.list_course_tabs` 里出现疑似签到/考勤 tab 且有 `external_tool_url`，调用 `canvas.read_external_tool_page(url=<external_tool_url>)`。
+   - 读取结果里的 `status_hints` 是从通用 tag/badge/status 类 DOM 提取的短状态标签；若存在，优先把它作为签到状态依据之一，但不要硬编码具体 class 或文案。
    - 若返回 `requires_browser_login`，告诉用户先在 Media 页点击"准备 Canvas 登录态"，完成登录后重试。
-   - 若 token 工具找不到签到入口，但用户确认 Canvas 左侧菜单有签到/考勤入口，请用户粘贴该 `external_tools` 页面 URL；学生账号/API 可能看不到左侧 LTI 导航配置。
+   - 若 token 工具和 tabs 都找不到签到入口，但用户确认浏览器左侧菜单有签到/考勤入口，请用户粘贴该 `external_tools` 页面 URL；学生账号/API 可能看不到所有 LTI 导航配置。
    - 基于外部工具页返回的可见文本回答，不要把脱敏前的 query/token/signature URL 展示出来。
 4. 课堂内容路径：
    - 先调用 `transcripts.list`，按课程名、日期、讲次、source 过滤候选。

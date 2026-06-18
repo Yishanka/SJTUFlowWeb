@@ -13,6 +13,12 @@ def _dataclass_list(items):
     return [item.__dict__ for item in items]
 
 
+STATUS_CLASS_PATTERN = re.compile(
+    r"(?:^|[-_])(?:tag|badge|status|state|danger|success|warning|error|primary|info)(?:$|[-_])",
+    re.I,
+)
+
+
 class _VisibleTextHTMLParser(HTMLParser):
     _BLOCK_TAGS = {
         "address",
@@ -121,6 +127,70 @@ class _PageLinkHTMLParser(HTMLParser):
         self._active = None
 
 
+class _StatusHintHTMLParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.hints: list[dict[str, str]] = []
+        self._stack: list[dict[str, Any]] = []
+        self._hidden_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.lower()
+        if tag in _VisibleTextHTMLParser._HIDDEN_TAGS:
+            self._hidden_depth += 1
+            return
+        attr_map = {name.lower(): value or "" for name, value in attrs}
+        classes = unescape(attr_map.get("class", "")).strip()
+        role = unescape(attr_map.get("role", "")).strip()
+        aria = unescape(attr_map.get("aria-label", "")).strip()
+        title = unescape(attr_map.get("title", "")).strip()
+        self._stack.append(
+            {
+                "tag": tag,
+                "classes": classes,
+                "role": role,
+                "aria_label": aria,
+                "title": title,
+                "text_parts": [],
+                "status_like": bool(
+                    STATUS_CLASS_PATTERN.search(classes)
+                    or role in {"alert", "status"}
+                    or aria
+                    or title
+                ),
+            }
+        )
+
+    def handle_data(self, data: str) -> None:
+        if self._hidden_depth:
+            return
+        for entry in self._stack:
+            entry["text_parts"].append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag in _VisibleTextHTMLParser._HIDDEN_TAGS and self._hidden_depth:
+            self._hidden_depth -= 1
+            return
+        if not self._stack:
+            return
+        entry = self._stack.pop()
+        if entry["tag"] != tag:
+            return
+        text = _normalize_page_text(" ".join(entry["text_parts"]))
+        fallback = entry["aria_label"] or entry["title"]
+        if entry["status_like"] and len(text or fallback) <= 80:
+            self.hints.append(
+                {
+                    "text": text or fallback,
+                    "classes": entry["classes"],
+                    "role": entry["role"],
+                    "aria_label": entry["aria_label"],
+                    "title": entry["title"],
+                }
+            )
+
+
 def _normalize_page_text(value: str) -> str:
     lines = []
     for line in str(value or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
@@ -137,6 +207,26 @@ def _visible_text_from_html(html: str) -> str:
     except Exception:
         return ""
     return _normalize_page_text("".join(parser.parts))
+
+
+def _status_hints_from_html(html: str, *, limit: int = 20) -> list[dict[str, str]]:
+    parser = _StatusHintHTMLParser()
+    try:
+        parser.feed(html or "")
+    except Exception:
+        return []
+
+    hints: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for hint in parser.hints:
+        key = (hint.get("text", ""), hint.get("classes", ""), hint.get("role", ""))
+        if not key[0] or key in seen:
+            continue
+        seen.add(key)
+        hints.append(hint)
+        if len(hints) >= limit:
+            break
+    return hints
 
 
 def _truncate_text(value: str, max_chars: int) -> tuple[str, bool]:
@@ -243,14 +333,17 @@ def read_canvas_external_tool_page(
     add_section("Main page", str(captured.get("text") or "") or _visible_text_from_html(html))
     frame_summaries: list[dict[str, Any]] = []
     links = _redacted_links_from_html(html, base_url=final_url)
+    status_hints = _status_hints_from_html(html)
     for frame in frames:
         if not isinstance(frame, dict):
             continue
         frame_url = str(frame.get("url") or "")
         frame_title = str(frame.get("title") or "")
         frame_text = str(frame.get("text") or "") or _visible_text_from_html(str(frame.get("html") or ""))
+        frame_html = str(frame.get("html") or "")
         add_section(f"Frame: {_redact_url(frame_url)}", frame_text)
-        links.extend(_redacted_links_from_html(str(frame.get("html") or ""), base_url=frame_url or final_url))
+        links.extend(_redacted_links_from_html(frame_html, base_url=frame_url or final_url))
+        status_hints.extend(_status_hints_from_html(frame_html))
         frame_summaries.append(
             {
                 "url": _redact_url(frame_url),
@@ -273,6 +366,17 @@ def read_canvas_external_tool_page(
         if len(unique_links) >= 40:
             break
 
+    unique_status_hints: list[dict[str, str]] = []
+    seen_status_hints: set[tuple[str, str, str]] = set()
+    for hint in status_hints:
+        key = (hint.get("text", ""), hint.get("classes", ""), hint.get("role", ""))
+        if not key[0] or key in seen_status_hints:
+            continue
+        seen_status_hints.add(key)
+        unique_status_hints.append(hint)
+        if len(unique_status_hints) >= 20:
+            break
+
     status = "ok" if combined else "empty"
     message = (
         "Read visible text from the Canvas external tool page."
@@ -288,6 +392,7 @@ def read_canvas_external_tool_page(
         "text_chars": len(combined),
         "truncated": truncated,
         "frames": frame_summaries,
+        "status_hints": unique_status_hints,
         "links": unique_links,
         "requires_browser_login": False,
         "browser_session": "sjtuflow-managed",
@@ -450,6 +555,26 @@ def register_canvas_tools(registry: ToolRegistry) -> None:
     )
     def list_module_items(ctx: ToolContext, course_id: str, module_id: str, limit: int = 100):
         return _dataclass_list(ctx.app.canvas.list_module_items(course_id, module_id, limit=limit))
+
+    @registry.tool(
+        name="canvas.list_course_tabs",
+        description=(
+            "List Canvas course navigation tabs, including external-tool tabs that may not appear in modules. "
+            "Use this to discover attendance/sign-in/考勤/签到 entries in the course left navigation."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "course_id": {"type": "string"},
+                "limit": {"type": "integer", "default": 100},
+            },
+            "required": ["course_id"],
+            "additionalProperties": False,
+        },
+        risk_level="read",
+    )
+    def list_course_tabs(ctx: ToolContext, course_id: str, limit: int = 100):
+        return _dataclass_list(ctx.app.canvas.list_course_tabs(course_id, limit=limit))
 
     @registry.tool(
         name="canvas.list_external_tool_module_items",

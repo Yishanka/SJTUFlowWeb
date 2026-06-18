@@ -423,6 +423,38 @@ def test_read_canvas_external_tool_page_extracts_visible_text_and_frames(tmp_pat
     assert "?***" in payload
 
 
+def test_read_canvas_external_tool_page_extracts_generic_status_tags(tmp_path, monkeypatch):
+    app = _app(tmp_path)
+
+    def fake_capture(app, url, *, wait_seconds=25, headless=True):
+        return {
+            "url": url,
+            "final_url": url,
+            "html": '<span class="el-tag el-tag--danger el-tag--medium el-tag--light">未签到</span>',
+            "title": "签到",
+            "text": "未签到",
+            "frames": [],
+            "profile_dir": str(tmp_path / "state" / "browser" / "canvas"),
+            "storage_state_exists": True,
+            "login_required": False,
+        }
+
+    monkeypatch.setattr(media_mod, "_capture_browser_html_page", fake_capture)
+
+    result = read_canvas_external_tool_page(app, "https://oc.sjtu.edu.cn/courses/89607/external_tools/123")
+
+    assert result["text"] == "Main page\n未签到"
+    assert result["status_hints"] == [
+        {
+            "text": "未签到",
+            "classes": "el-tag el-tag--danger el-tag--medium el-tag--light",
+            "role": "",
+            "aria_label": "",
+            "title": "",
+        }
+    ]
+
+
 def test_read_canvas_external_tool_page_requires_canvas_external_tool_url(tmp_path):
     app = _app(tmp_path)
     with pytest.raises(ValueError):
@@ -455,6 +487,59 @@ def test_read_canvas_external_tool_page_login_required(tmp_path, monkeypatch):
     assert result["requires_browser_login"] is True
     assert result["text"] == ""
     assert "准备 Canvas 登录态" in result["message"]
+
+
+def test_canvas_course_tabs_tool_returns_external_tool_urls(tmp_path, monkeypatch):
+    app = _app(tmp_path)
+
+    class _Tab:
+        def __init__(self) -> None:
+            self.id = "context_external_tool_321"
+            self.course_id = "89607"
+            self.label = "课堂签到"
+            self.type = "external"
+            self.position = 6
+            self.hidden = False
+            self.visibility = "public"
+            self.html_url = ""
+            self.external_tool_url = "https://oc.sjtu.edu.cn/courses/89607/external_tools/321"
+
+    monkeypatch.setattr(app.canvas, "list_course_tabs", lambda course_id, limit=100: [_Tab()])
+
+    registry = build_registry()
+    result = run_tool(
+        registry.get("canvas.list_course_tabs"),
+        ToolContext(app=app, interactive=False),
+        {"course_id": "89607"},
+    )
+
+    assert result.ok is True
+    assert result.data[0]["label"] == "课堂签到"
+    assert result.data[0]["external_tool_url"].endswith("/courses/89607/external_tools/321")
+
+
+def test_canvas_client_course_tabs_builds_external_tool_url(tmp_path, monkeypatch):
+    app = _app(tmp_path)
+
+    def fake_paginate(path, params=None, *, limit=100):
+        assert path == "/api/v1/courses/89607/tabs"
+        return [
+            {
+                "id": "context_external_tool_321",
+                "label": "签到",
+                "type": "external",
+                "position": 3,
+                "hidden": False,
+                "visibility": "public",
+            }
+        ]
+
+    monkeypatch.setattr(app.canvas, "_paginate", fake_paginate)
+
+    tabs = app.canvas.list_course_tabs("89607")
+
+    assert tabs[0].label == "签到"
+    assert tabs[0].external_tool_url == "https://oc.sjtu.edu.cn/courses/89607/external_tools/321"
 
 
 # --------------------------------------------------------------------------- #
@@ -1115,6 +1200,7 @@ def test_media_tools_registered():
         "media.save_transcript",
     } <= names
     assert "canvas.read_external_tool_page" in names
+    assert "canvas.list_course_tabs" in names
 
 
 def test_media_transcribe_tool_via_registry(tmp_path, fake_pipeline):

@@ -75,6 +75,19 @@ class CanvasModuleItem:
     page_url: str = ""
 
 
+@dataclass
+class CanvasTab:
+    id: str
+    course_id: str
+    label: str = ""
+    type: str = ""
+    position: int = 0
+    hidden: bool = False
+    visibility: str = ""
+    html_url: str = ""
+    external_tool_url: str = ""
+
+
 class CanvasClient:
     def __init__(self, config: CanvasConfig) -> None:
         self.config = config
@@ -316,6 +329,39 @@ class CanvasClient:
                 if item.type.lower() == "externaltool" or "/external_tools/" in item.html_url:
                     results.append(item)
         return results
+
+    def list_course_tabs(self, course_id: str, *, limit: int = 100) -> list[CanvasTab]:
+        raw_tabs = self._paginate(
+            f"/api/v1/courses/{urllib.parse.quote(str(course_id))}/tabs",
+            {},
+            limit=limit,
+        )
+        tabs: list[CanvasTab] = []
+        for item in raw_tabs:
+            if not isinstance(item, dict):
+                continue
+            tab_id = str(item.get("id") or "")
+            html_url = str(item.get("html_url") or item.get("url") or "")
+            external_tool_url = html_url if "/external_tools/" in urllib.parse.urlparse(html_url).path else ""
+            prefix = "context_external_tool_"
+            if not external_tool_url and tab_id.startswith(prefix):
+                tool_id = tab_id.removeprefix(prefix)
+                if tool_id:
+                    external_tool_url = f"{self.base_url}/courses/{urllib.parse.quote(str(course_id))}/external_tools/{urllib.parse.quote(tool_id)}"
+            tabs.append(
+                CanvasTab(
+                    id=tab_id,
+                    course_id=str(course_id),
+                    label=str(item.get("label") or item.get("name") or tab_id),
+                    type=str(item.get("type") or ""),
+                    position=int(item.get("position") or 0),
+                    hidden=bool(item.get("hidden")),
+                    visibility=str(item.get("visibility") or ""),
+                    html_url=html_url,
+                    external_tool_url=external_tool_url,
+                )
+            )
+        return tabs
 
     def get_file(self, file_id: str) -> CanvasFile:
         item, _ = self._request(f"/api/v1/files/{urllib.parse.quote(str(file_id))}")
